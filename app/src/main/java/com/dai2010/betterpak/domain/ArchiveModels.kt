@@ -1,10 +1,13 @@
 package com.dai2010.betterpak.domain
 
-enum class ArchiveFormat(val label: String) {
-    ZIP("ZIP"),
-    RAR("RAR / RAR5"),
-    SEVEN_Z("7z"),
-    UNKNOWN("未知格式"),
+enum class ArchiveFormat(
+    val label: String,
+    val supportsPassword: Boolean,
+) {
+    ZIP("ZIP", supportsPassword = false),
+    RAR("RAR / RAR5", supportsPassword = true),
+    SEVEN_Z("7z", supportsPassword = true),
+    UNKNOWN("未知格式", supportsPassword = false),
 }
 
 data class ArchiveItem(

@@ -45,6 +45,16 @@ object ArchiveRepository {
     private const val MAX_PREVIEW_BYTES = 8L * 1024L * 1024L
     private const val BUFFER_SIZE = 32 * 1024
 
+    fun supportedArchiveMimeTypes(): Array<String> = arrayOf(
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/vnd.rar",
+        "application/x-rar-compressed",
+        "application/x-rar",
+        "application/x-7z-compressed",
+        "application/7z",
+    )
+
     suspend fun list(
         context: Context,
         uri: Uri,

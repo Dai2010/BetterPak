@@ -1,14 +1,8 @@
 package com.dai2010.betterpak.ui
 
-import android.graphics.BitmapFactory
-import android.media.MediaPlayer
 import android.net.Uri
-import android.widget.MediaController
-import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,7 +35,6 @@ import androidx.compose.material.icons.outlined.Preview
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Upload
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
@@ -64,7 +57,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -77,12 +69,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -93,8 +83,6 @@ import com.dai2010.betterpak.data.ThemeMode
 import com.dai2010.betterpak.domain.ArchiveCreateOptions
 import com.dai2010.betterpak.domain.ArchiveExtractOptions
 import com.dai2010.betterpak.domain.ArchiveFormat
-import com.dai2010.betterpak.domain.ArchiveItem
-import com.dai2010.betterpak.domain.ArchivePreview
 import com.dai2010.betterpak.domain.ArchiveProgress
 import com.dai2010.betterpak.domain.CompressionAlgorithm
 import com.dai2010.betterpak.domain.OverwritePolicy
@@ -102,7 +90,6 @@ import com.dai2010.betterpak.ui.theme.BetterPakTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import java.io.File
 import kotlin.math.roundToInt
 
 private object Routes {
@@ -110,6 +97,7 @@ private object Routes {
     const val CREATE = "create"
     const val EXTRACT = "extract"
     const val PREVIEW = "preview"
+    const val PREVIEW_BROWSER = "preview_browser"
     const val SETTINGS = "settings"
 }
 
@@ -119,6 +107,7 @@ fun BetterPakApp(initialArchiveUri: Uri? = null) {
     val settingsRepository = remember { SettingsRepository(context.applicationContext) }
     val settings by settingsRepository.settings.collectAsState(initial = AppSettings())
     val navController = rememberNavController()
+    var previewRequest by remember { mutableStateOf<PreviewRequest?>(null) }
 
     BetterPakTheme(settings) {
         NavHost(
@@ -136,10 +125,22 @@ fun BetterPakApp(initialArchiveUri: Uri? = null) {
             composable(Routes.CREATE) { CreateScreen(onBack = { navController.popBackStack() }) }
             composable(Routes.EXTRACT) { ExtractScreen(onBack = { navController.popBackStack() }) }
             composable(Routes.PREVIEW) {
-                PreviewScreen(
+                PreviewSetupScreen(
                     initialArchiveUri = initialArchiveUri,
                     onBack = { navController.popBackStack() },
+                    onOpenPreview = { request ->
+                        previewRequest = request
+                        navController.navigate(Routes.PREVIEW_BROWSER)
+                    },
                 )
+            }
+            composable(Routes.PREVIEW_BROWSER) {
+                previewRequest?.let { request ->
+                    PreviewBrowserScreen(
+                        request = request,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
             }
             composable(Routes.SETTINGS) {
                 SettingsScreen(
@@ -203,7 +204,7 @@ private fun HomeScreen(
             item {
                 HomeActionCard(
                     title = "预览压缩包",
-                    subtitle = "查看条目，选择单个或多个文件解压",
+                    subtitle = "先设置参数，再用独立界面预览文件",
                     icon = Icons.Outlined.Preview,
                     onClick = onPreview,
                 )
@@ -267,9 +268,7 @@ private fun CreateScreen(onBack: () -> Unit) {
             status = "已选择 ${selectedUris.size} 个文件或目录"
         }
     }
-    val createOutput = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream"),
-    ) { outputUri ->
+    val startCreate: (Uri?) -> Unit = { outputUri ->
         if (outputUri != null) {
             busy = true
             progress = null
@@ -307,6 +306,14 @@ private fun CreateScreen(onBack: () -> Unit) {
             }
         }
     }
+    val createZipOutput = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+        startCreate,
+    )
+    val createSevenZOutput = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/x-7z-compressed"),
+        startCreate,
+    )
 
     Scaffold(topBar = { BackTopBar("创建压缩包", onBack) }) { padding ->
         Column(
@@ -318,8 +325,9 @@ private fun CreateScreen(onBack: () -> Unit) {
                 FilterChip(
                     selected = selectedFormat == ArchiveFormat.ZIP.name,
                     onClick = {
-                        selectedFormat = ArchiveFormat.ZIP.name
-                        algorithm = CompressionAlgorithm.DEFLATE.name
+                    selectedFormat = ArchiveFormat.ZIP.name
+                    algorithm = CompressionAlgorithm.DEFLATE.name
+                    password = ""
                     },
                     label = { Text("ZIP（可创建）") },
                 )
@@ -370,27 +378,27 @@ private fun CreateScreen(onBack: () -> Unit) {
                     }
                     if (advancedExpanded) {
                         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            OutlinedTextField(
-                                value = password,
-                                onValueChange = { password = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                label = { Text("密码加密（可选）") },
-                                supportingText = {
-                                    Text(
-                                        if (selectedFormat == ArchiveFormat.ZIP.name) {
-                                            "ZIP 创建暂不支持密码加密；密码不会保存"
-                                        } else {
-                                            "7z 使用 AES-256；密码不会保存"
-                                        },
-                                    )
-                                },
-                                visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                                trailingIcon = {
-                                    TextButton(onClick = { passwordVisible = !passwordVisible }) {
-                                        Text(if (passwordVisible) "隐藏" else "显示")
-                                    }
-                                },
-                            )
+                            if (selectedFormat == ArchiveFormat.SEVEN_Z.name) {
+                                OutlinedTextField(
+                                    value = password,
+                                    onValueChange = { password = it },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("密码加密（可选）") },
+                                    supportingText = { Text("7z 使用 AES-256；密码不会保存") },
+                                    visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                                    trailingIcon = {
+                                        TextButton(onClick = { passwordVisible = !passwordVisible }) {
+                                            Text(if (passwordVisible) "隐藏" else "显示")
+                                        }
+                                    },
+                                )
+                            } else {
+                                Text(
+                                    "ZIP 不支持密码加密，不需要设置密码。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                             Text(
                                 "压缩算法：${CompressionAlgorithm.valueOf(algorithm).label}",
                                 style = MaterialTheme.typography.labelLarge,
@@ -458,7 +466,11 @@ private fun CreateScreen(onBack: () -> Unit) {
                             threads = threads,
                         )
                         pendingFormat = selectedFormat
-                        createOutput.launch(if (selectedFormat == ArchiveFormat.ZIP.name) "betterpak.zip" else "betterpak.7z")
+                        if (selectedFormat == ArchiveFormat.ZIP.name) {
+                            createZipOutput.launch("betterpak.zip")
+                        } else {
+                            createSevenZOutput.launch("betterpak.7z")
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -478,6 +490,7 @@ private fun ExtractScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var archiveUri by remember { mutableStateOf<Uri?>(null) }
+    var archiveFormat by remember { mutableStateOf(ArchiveFormat.UNKNOWN) }
     var destinationUri by remember { mutableStateOf<Uri?>(null) }
     var password by rememberSaveable { mutableStateOf("") }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
@@ -495,7 +508,13 @@ private fun ExtractScreen(onBack: () -> Unit) {
     val pickArchive = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { ArchiveRepository.persistUriPermission(context, it) }
         archiveUri = uri
-        status = if (uri == null) null else "已选择压缩包"
+        archiveFormat = uri?.let { ArchiveRepository.detectFormat(context, it) } ?: ArchiveFormat.UNKNOWN
+        if (!archiveFormat.supportsPassword) password = ""
+        status = when {
+            uri == null -> null
+            archiveFormat == ArchiveFormat.UNKNOWN -> "无法识别格式，请选择 ZIP、RAR 或 7z 文件"
+            else -> "已选择 ${archiveFormat.label} 压缩包"
+        }
     }
     val pickDestination = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let { ArchiveRepository.persistUriPermission(context, it) }
@@ -507,15 +526,15 @@ private fun ExtractScreen(onBack: () -> Unit) {
             modifier = Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            OutlinedButton(onClick = { pickArchive.launch(arrayOf("*/*")) }, modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = { pickArchive.launch(ArchiveRepository.supportedArchiveMimeTypes()) }, modifier = Modifier.fillMaxWidth()) {
                 Icon(Icons.Outlined.Archive, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text(if (archiveUri == null) "选择 ZIP、RAR 或 7z 压缩包" else "重新选择压缩包")
             }
-            archiveUri?.let { uri ->
+            archiveUri?.let {
                 AssistChip(
                     onClick = {},
-                    label = { Text("格式：${ArchiveRepository.detectFormat(context, uri).label}") },
+                    label = { Text("格式：${archiveFormat.label}") },
                     leadingIcon = { Icon(Icons.Outlined.CheckCircle, contentDescription = null) },
                 )
             }
@@ -533,18 +552,30 @@ private fun ExtractScreen(onBack: () -> Unit) {
                     }
                     if (advancedExpanded) {
                         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            OutlinedTextField(
-                                value = password,
-                                onValueChange = { password = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                label = { Text("解压密码（可选）") },
-                                visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                                trailingIcon = {
-                                    TextButton(onClick = { passwordVisible = !passwordVisible }) {
-                                        Text(if (passwordVisible) "隐藏" else "显示")
-                                    }
-                                },
-                            )
+                            if (archiveFormat.supportsPassword) {
+                                OutlinedTextField(
+                                    value = password,
+                                    onValueChange = { password = it },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    label = { Text("解压密码（可选）") },
+                                    visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                                    trailingIcon = {
+                                        TextButton(onClick = { passwordVisible = !passwordVisible }) {
+                                            Text(if (passwordVisible) "隐藏" else "显示")
+                                        }
+                                    },
+                                )
+                            } else if (archiveUri != null) {
+                                Text(
+                                    if (archiveFormat == ArchiveFormat.ZIP) {
+                                        "ZIP 不支持密码读取，不需要设置密码。"
+                                    } else {
+                                        "当前格式不支持密码读取。"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                             Text("已有文件处理：", style = MaterialTheme.typography.labelLarge)
                             Box {
                                 OutlinedButton(onClick = { overwriteMenuExpanded = true }) {
@@ -616,7 +647,7 @@ private fun ExtractScreen(onBack: () -> Unit) {
                         val maxEntries = maxEntriesText.toIntOrNull()?.coerceAtLeast(1) ?: 100000
                         val maxGb = maxSizeGbText.toDoubleOrNull()?.coerceAtLeast(0.1) ?: 50.0
                         val options = ArchiveExtractOptions(
-                            password = password,
+                            password = if (archiveFormat.supportsPassword) password else "",
                             overwritePolicy = OverwritePolicy.valueOf(overwritePolicy),
                             maxEntries = maxEntries,
                             maxExpandedBytes = (maxGb * 1024 * 1024 * 1024).toLong(),
@@ -655,454 +686,6 @@ private fun ExtractScreen(onBack: () -> Unit) {
                 Spacer(Modifier.width(8.dp))
                 Text("解压全部文件")
             }
-        }
-    }
-}
-
-@Composable
-private fun PreviewScreen(initialArchiveUri: Uri? = null, onBack: () -> Unit) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var archiveUri by remember(initialArchiveUri) { mutableStateOf(initialArchiveUri) }
-    var destinationUri by remember { mutableStateOf<Uri?>(null) }
-    var password by rememberSaveable { mutableStateOf("") }
-    var items by remember { mutableStateOf<List<ArchiveItem>>(emptyList()) }
-    var selectedPaths by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var loading by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf<String?>(null) }
-    var progress by remember { mutableStateOf<ArchiveProgress?>(null) }
-    var operationJob by remember { mutableStateOf<Job?>(null) }
-    var previewItem by remember { mutableStateOf<ArchivePreview?>(null) }
-    var unsupportedPreviewPath by remember { mutableStateOf<String?>(null) }
-    var previewLoading by remember { mutableStateOf(false) }
-    var advancedExpanded by rememberSaveable { mutableStateOf(false) }
-    var overwritePolicy by rememberSaveable { mutableStateOf(OverwritePolicy.REPLACE.name) }
-    var maxEntriesText by rememberSaveable { mutableStateOf("100000") }
-    var maxSizeGbText by rememberSaveable { mutableStateOf("50") }
-    var extractionThreads by rememberSaveable { mutableIntStateOf(2) }
-    var overwriteMenuExpanded by remember { mutableStateOf(false) }
-
-    val pickArchive = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { ArchiveRepository.persistUriPermission(context, it) }
-        archiveUri = uri
-        items = emptyList()
-        selectedPaths = emptySet()
-        if (uri != null) loadArchive(scope, context, uri, password, { loading = it }, { result ->
-            result.fold(
-                onSuccess = { loaded -> items = loaded; status = "已读取 ${loaded.size} 个条目" },
-                onFailure = { error -> status = "读取失败：${error.message ?: "可能需要密码"}" },
-            )
-        })
-    }
-    val pickDestination = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { ArchiveRepository.persistUriPermission(context, it) }
-        destinationUri = uri
-    }
-
-    LaunchedEffect(initialArchiveUri) {
-        initialArchiveUri?.let { uri ->
-            ArchiveRepository.persistUriPermission(context, uri)
-            loadArchive(scope, context, uri, password, { loading = it }, { result ->
-                result.fold(
-                    onSuccess = { loaded -> items = loaded; status = "已读取 ${loaded.size} 个条目" },
-                    onFailure = { error -> status = "读取失败：${error.message ?: "可能需要密码"}" },
-                )
-            })
-        }
-    }
-
-    Scaffold(topBar = { BackTopBar("预览压缩包", onBack) }) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            Column(
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                OutlinedButton(onClick = { pickArchive.launch(arrayOf("*/*")) }, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Outlined.Archive, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text(if (archiveUri == null) "选择 ZIP、RAR 或 7z 压缩包" else "重新选择压缩包")
-                }
-                if (archiveUri != null) {
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("密码压缩包？展开高级选项输入密码后重新读取。", style = MaterialTheme.typography.bodySmall)
-                            TextButton(onClick = { advancedExpanded = !advancedExpanded }) {
-                                Icon(if (advancedExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, contentDescription = null)
-                                Spacer(Modifier.width(8.dp))
-                                Text("高级选项")
-                            }
-                            if (advancedExpanded) {
-                                OutlinedTextField(
-                                    value = password,
-                                    onValueChange = { password = it },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    label = { Text("预览/解压密码") },
-                                    visualTransformation = PasswordVisualTransformation(),
-                                )
-                                Text("已有文件处理：", style = MaterialTheme.typography.labelLarge)
-                                Box {
-                                    OutlinedButton(onClick = { overwriteMenuExpanded = true }) {
-                                        Text(OverwritePolicy.valueOf(overwritePolicy).label)
-                                    }
-                                    DropdownMenu(
-                                        expanded = overwriteMenuExpanded,
-                                        onDismissRequest = { overwriteMenuExpanded = false },
-                                    ) {
-                                        OverwritePolicy.entries.forEach { policy ->
-                                            DropdownMenuItem(
-                                                text = { Text(policy.label) },
-                                                onClick = {
-                                                    overwritePolicy = policy.name
-                                                    overwriteMenuExpanded = false
-                                                },
-                                            )
-                                        }
-                                    }
-                                }
-                                OutlinedTextField(
-                                    value = maxEntriesText,
-                                    onValueChange = { maxEntriesText = it.filter(Char::isDigit) },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    label = { Text("最多处理文件数") },
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                )
-                                OutlinedTextField(
-                                    value = maxSizeGbText,
-                                    onValueChange = { maxSizeGbText = it.filter { char -> char.isDigit() || char == '.' } },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    label = { Text("最大展开体积（GB）") },
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                                )
-                                Text("解压任务线程：$extractionThreads", style = MaterialTheme.typography.labelLarge)
-                                Slider(
-                                    value = extractionThreads.toFloat(),
-                                    onValueChange = { extractionThreads = it.roundToInt().coerceIn(1, 8) },
-                                    valueRange = 1f..8f,
-                                    steps = 6,
-                                )
-                                Button(onClick = {
-                                    archiveUri?.let { uri ->
-                                        loadArchive(scope, context, uri, password, { loading = it }, { result ->
-                                            result.fold(
-                                                onSuccess = { loaded -> items = loaded; selectedPaths = emptySet(); status = "已读取 ${loaded.size} 个条目" },
-                                                onFailure = { error -> status = "读取失败：${error.message ?: "密码错误或文件损坏"}" },
-                                            )
-                                        })
-                                    }
-                                }) { Text("重新读取") }
-                            }
-                        }
-                    }
-                }
-                if (status != null) Text(status!!, style = MaterialTheme.typography.bodySmall)
-                if (loading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-            if (items.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text("${items.size} 个条目", style = MaterialTheme.typography.titleMedium)
-                    TextButton(onClick = {
-                        selectedPaths = if (selectedPaths.size == items.count { !it.isDirectory }) {
-                            emptySet()
-                        } else {
-                            items.filterNot { it.isDirectory }.map { it.path }.toSet()
-                        }
-                    }) {
-                        Text(if (selectedPaths.size == items.count { !it.isDirectory }) "取消全选" else "全选文件")
-                    }
-                }
-                HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
-            }
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                items(items = items, key = { it.path }) { item ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = !item.isDirectory && !previewLoading) {
-                                archiveUri?.let { archive ->
-                                    previewLoading = true
-                                    status = "正在预览 ${item.path}…"
-                                    scope.launch {
-                                        val result = ArchiveRepository.preview(context, archive, item.path, password)
-                                        previewLoading = false
-                                        result.fold(
-                                            onSuccess = { previewItem = it; status = null },
-                                            onFailure = {
-                                                unsupportedPreviewPath = item.path
-                                                status = "无法预览 ${item.path}：${it.message ?: "请先解压查看"}"
-                                            },
-                                        )
-                                    }
-                                }
-                            },
-                    ) {
-                        Checkbox(
-                            checked = selectedPaths.contains(item.path),
-                            onCheckedChange = { checked ->
-                                selectedPaths = if (checked) selectedPaths + item.path else selectedPaths - item.path
-                            },
-                            enabled = !item.isDirectory,
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(item.path, maxLines = 2)
-                            Text(
-                                if (item.isDirectory) "目录" else formatSize(item.size),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
-            }
-            if (items.isNotEmpty()) {
-                Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(onClick = { pickDestination.launch(null) }, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Outlined.FolderOpen, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text(if (destinationUri == null) "选择解压目标目录" else "已选择目标目录")
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                        OutlinedButton(
-                            onClick = {
-                                    operationJob = extractPreview(
-                                    context,
-                                    scope,
-                                    archiveUri,
-                                    destinationUri,
-                                    selectedPaths,
-                                    extractOptions = previewExtractOptions(
-                                        password = password,
-                                        overwritePolicy = overwritePolicy,
-                                        maxEntriesText = maxEntriesText,
-                                        maxSizeGbText = maxSizeGbText,
-                                        threads = extractionThreads,
-                                    ),
-                                    allFiles = false,
-                                    setBusy = { busy = it },
-                                    setStatus = { status = it },
-                                    setProgress = { progress = it },
-                                )
-                            },
-                            modifier = Modifier.weight(1f),
-                            enabled = !busy && selectedPaths.isNotEmpty(),
-                        ) { Text("解压选中") }
-                        Button(
-                            onClick = {
-                                operationJob = extractPreview(
-                                    context,
-                                    scope,
-                                    archiveUri,
-                                    destinationUri,
-                                    selectedPaths,
-                                    extractOptions = previewExtractOptions(
-                                        password = password,
-                                        overwritePolicy = overwritePolicy,
-                                        maxEntriesText = maxEntriesText,
-                                        maxSizeGbText = maxSizeGbText,
-                                        threads = extractionThreads,
-                                    ),
-                                    allFiles = true,
-                                    setBusy = { busy = it },
-                                    setStatus = { status = it },
-                                    setProgress = { progress = it },
-                                )
-                            },
-                            modifier = Modifier.weight(1f),
-                            enabled = !busy,
-                        ) { Text("解压全部") }
-                    }
-                }
-            }
-        }
-    }
-    if (status != null && (busy || status!!.startsWith("解压") || status!!.startsWith("预览"))) {
-        StatusCard(
-            message = status!!,
-            busy = busy || previewLoading,
-            progress = progress?.fraction,
-            onCancel = if (busy) ({ operationJob?.cancel() }) else null,
-        )
-    }
-    val extractSinglePreview: (String) -> Unit = { path ->
-        previewItem = null
-        unsupportedPreviewPath = null
-        operationJob = extractPreview(
-            context = context,
-            scope = scope,
-            archiveUri = archiveUri,
-            destinationUri = destinationUri,
-            selectedPaths = setOf(path),
-            extractOptions = previewExtractOptions(
-                password = password,
-                overwritePolicy = overwritePolicy,
-                maxEntriesText = maxEntriesText,
-                maxSizeGbText = maxSizeGbText,
-                threads = extractionThreads,
-            ),
-            allFiles = false,
-            setBusy = { busy = it },
-            setStatus = { status = it },
-            setProgress = { progress = it },
-        )
-    }
-    previewItem?.let { item ->
-        AlertDialog(
-            onDismissRequest = { previewItem = null },
-            title = { Text(item.path) },
-            text = {
-                when {
-                    item.text != null -> Text(
-                        item.text,
-                        modifier = Modifier.fillMaxWidth().height(300.dp).verticalScroll(rememberScrollState()),
-                    )
-                    item.mimeType.startsWith("audio/") || item.mimeType.startsWith("video/") -> {
-                        MediaPreview(item)
-                    }
-                    item.bytes != null -> {
-                        val bitmap = BitmapFactory.decodeByteArray(item.bytes, 0, item.bytes.size)
-                        if (bitmap != null) {
-                            Image(
-                                bitmap = bitmap.asImageBitmap(),
-                                contentDescription = item.path,
-                                modifier = Modifier.fillMaxWidth().height(300.dp),
-                            )
-                        } else {
-                            Text("图片无法解码，请选择解压")
-                        }
-                    }
-                    else -> Text("该文件没有可显示的预览内容")
-                }
-            },
-            confirmButton = { TextButton(onClick = { extractSinglePreview(item.path) }) { Text("解压此文件") } },
-            dismissButton = { TextButton(onClick = { previewItem = null }) { Text("关闭") } },
-        )
-    }
-    unsupportedPreviewPath?.let { path ->
-        AlertDialog(
-            onDismissRequest = { unsupportedPreviewPath = null },
-            title = { Text("无法预览此文件") },
-            text = { Text("$path\n当前版本无法安全预览此类型，请选择解压查看原文件。") },
-            confirmButton = { TextButton(onClick = { extractSinglePreview(path) }) { Text("解压此文件") } },
-            dismissButton = { TextButton(onClick = { unsupportedPreviewPath = null }) { Text("关闭") } },
-        )
-    }
-}
-
-@Composable
-private fun MediaPreview(item: ArchivePreview) {
-    val context = LocalContext.current
-    var mediaFile by remember(item.path) { mutableStateOf<File?>(null) }
-    var materializeError by remember(item.path) { mutableStateOf<String?>(null) }
-
-    DisposableEffect(item.path, item.mimeType, item.bytes) {
-        val fileResult = runCatching {
-            val file = File.createTempFile("betterpak-preview-", ".media", context.cacheDir)
-            file.outputStream().use { output -> output.write(item.bytes ?: error("预览内容为空")) }
-            file
-        }
-        mediaFile = fileResult.getOrNull()
-        materializeError = fileResult.exceptionOrNull()?.message
-        onDispose {
-            fileResult.getOrNull()?.delete()
-        }
-    }
-
-    when {
-        materializeError != null -> Text("媒体文件准备失败：$materializeError\n请解压后使用其他播放器打开。")
-        mediaFile == null -> Text("正在准备媒体预览…")
-        item.mimeType.startsWith("audio/") -> AudioPreview(mediaFile!!)
-        else -> VideoPreview(mediaFile!!)
-    }
-}
-
-@Composable
-private fun AudioPreview(file: File) {
-    var prepared by remember(file) { mutableStateOf(false) }
-    var playing by remember(file) { mutableStateOf(false) }
-    var playbackError by remember(file) { mutableStateOf<String?>(null) }
-    val player = remember(file) { MediaPlayer() }
-
-    DisposableEffect(file) {
-        player.setOnPreparedListener {
-            prepared = true
-        }
-        player.setOnCompletionListener {
-            playing = false
-        }
-        player.setOnErrorListener { _, what, extra ->
-            playbackError = "播放器不支持此音频（$what/$extra）"
-            playing = false
-            true
-        }
-        runCatching {
-            player.setDataSource(file.absolutePath)
-            player.prepareAsync()
-        }.onFailure { error ->
-            playbackError = error.message ?: "播放器初始化失败"
-        }
-        onDispose {
-            player.release()
-        }
-    }
-
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        if (playbackError != null) {
-            Text("$playbackError\n请解压后使用其他播放器打开。")
-        } else {
-            Text("音频预览")
-            Button(
-                onClick = {
-                    if (playing) {
-                        player.pause()
-                        playing = false
-                    } else {
-                        player.start()
-                        playing = true
-                    }
-                },
-                enabled = prepared,
-            ) {
-                Text(if (playing) "暂停" else if (prepared) "播放" else "准备中…")
-            }
-        }
-    }
-}
-
-@Composable
-private fun VideoPreview(file: File) {
-    var playbackError by remember(file) { mutableStateOf<String?>(null) }
-
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        AndroidView(
-            modifier = Modifier.fillMaxWidth().height(300.dp),
-            factory = { videoContext ->
-                val videoView = VideoView(videoContext)
-                val controller = MediaController(videoContext)
-                controller.setAnchorView(videoView)
-                videoView.setMediaController(controller)
-                videoView.setVideoPath(file.absolutePath)
-                videoView.setOnPreparedListener { mediaPlayer ->
-                    mediaPlayer.isLooping = true
-                    videoView.start()
-                }
-                videoView.setOnErrorListener { _, what, extra ->
-                    playbackError = "播放器不支持此视频（$what/$extra）"
-                    true
-                }
-                videoView
-            },
-        )
-        if (playbackError != null) {
-            Text("$playbackError\n请解压后使用其他播放器打开。")
         }
     }
 }
@@ -1239,89 +822,6 @@ private fun StatusCard(
             }
         }
     }
-}
-
-private fun loadArchive(
-    scope: kotlinx.coroutines.CoroutineScope,
-    context: android.content.Context,
-    uri: Uri,
-    password: String,
-    setLoading: (Boolean) -> Unit,
-    setResult: (Result<List<ArchiveItem>>) -> Unit,
-) {
-    setLoading(true)
-    scope.launch {
-        setResult(ArchiveRepository.list(context, uri, password))
-        setLoading(false)
-    }
-}
-
-private fun extractPreview(
-    context: android.content.Context,
-    scope: kotlinx.coroutines.CoroutineScope,
-    archiveUri: Uri?,
-    destinationUri: Uri?,
-    selectedPaths: Set<String>,
-    extractOptions: ArchiveExtractOptions,
-    allFiles: Boolean,
-    setBusy: (Boolean) -> Unit,
-    setStatus: (String) -> Unit,
-    setProgress: (ArchiveProgress?) -> Unit,
-): Job? {
-    if (archiveUri == null || destinationUri == null) {
-        setStatus("请选择目标目录")
-        return null
-    }
-    if (!allFiles && selectedPaths.isEmpty()) {
-        setStatus("请至少选择一个文件")
-        return null
-    }
-    setBusy(true)
-    setProgress(null)
-    setStatus(if (allFiles) "正在解压当前页面全部文件…" else "正在解压选中文件…")
-    return scope.launch {
-        try {
-            val result = ArchiveRepository.extract(
-                context = context,
-                archiveUri = archiveUri,
-                destinationUri = destinationUri,
-                selectedPaths = if (allFiles) null else selectedPaths,
-                options = extractOptions,
-                onProgress = { setProgress(it) },
-            )
-            setStatus(result.fold({ "解压完成，共处理 $it 个文件" }, { "解压失败：${it.message ?: "未知错误"}" }))
-        } catch (_: CancellationException) {
-            setStatus("已取消解压")
-        } finally {
-            setBusy(false)
-        }
-    }
-}
-
-private fun previewExtractOptions(
-    password: String,
-    overwritePolicy: String,
-    maxEntriesText: String,
-    maxSizeGbText: String,
-    threads: Int,
-): ArchiveExtractOptions {
-    val maxEntries = maxEntriesText.toIntOrNull()?.coerceAtLeast(1) ?: 100000
-    val maxGb = maxSizeGbText.toDoubleOrNull()?.coerceAtLeast(0.1) ?: 50.0
-    return ArchiveExtractOptions(
-        password = password,
-        overwritePolicy = OverwritePolicy.valueOf(overwritePolicy),
-        maxEntries = maxEntries,
-        maxExpandedBytes = (maxGb * 1024 * 1024 * 1024).toLong(),
-        threads = threads,
-    )
-}
-
-private fun formatSize(size: Long): String {
-    if (size < 0) return "大小未知"
-    if (size < 1024) return "$size B"
-    if (size < 1024 * 1024) return "%.1f KB".format(size / 1024.0)
-    if (size < 1024L * 1024L * 1024L) return "%.1f MB".format(size / (1024.0 * 1024.0))
-    return "%.1f GB".format(size / (1024.0 * 1024.0 * 1024.0))
 }
 
 private fun normalizeHex(value: String): String? {
