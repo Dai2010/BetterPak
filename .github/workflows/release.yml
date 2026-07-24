@@ -87,9 +87,12 @@ jobs:
           apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
           test -x "$apksigner"
           "$apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/betterpak-certificates.txt"
-          jarsigner -verify -strict "$aab" > /dev/null
           actual_fingerprint="$(sed -n 's/.*certificate SHA-256 digest: //p' "$RUNNER_TEMP/betterpak-certificates.txt" | head -n 1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
           test -n "$actual_fingerprint"
+          jarsigner -verify -verbose -certs "$aab" > "$RUNNER_TEMP/betterpak-aab-certificates.txt"
+          aab_fingerprint="$(keytool -printcert -jarfile "$aab" | sed -n 's/.*SHA256: //p' | head -n 1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          test -n "$aab_fingerprint"
+          test "$actual_fingerprint" = "$aab_fingerprint"
           echo "BETTERPAK_CERTIFICATE_SHA256=$actual_fingerprint" >> "$GITHUB_ENV"
 
       - name: Archive release metadata and checksums
