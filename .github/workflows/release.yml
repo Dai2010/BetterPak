@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag, for example v0.0.3
+        description: Release tag, for example v0.0.4
         required: true
-        default: v0.0.3
+        default: v0.0.4
   push:
     tags:
       - "v*"
@@ -41,10 +41,10 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Build unsigned release APK
-        run: gradle --no-daemon --max-workers=1 lintRelease assembleRelease
+      - name: Run tests and static checks
+        run: gradle --no-daemon --max-workers=1 test lintRelease
 
-      - name: Sign Android APK with release key
+      - name: Restore release keystore
         env:
           BETTERPAK_ANDROID_KEYSTORE_BASE64: ${{ secrets.BETTERPAK_ANDROID_KEYSTORE_BASE64 }}
           BETTERPAK_ANDROID_STORE_PASSWORD: ${{ secrets.BETTERPAK_ANDROID_STORE_PASSWORD }}
@@ -56,43 +56,93 @@ jobs:
           test -n "$BETTERPAK_ANDROID_STORE_PASSWORD"
           test -n "$BETTERPAK_ANDROID_KEY_ALIAS"
           test -n "$BETTERPAK_ANDROID_KEY_PASSWORD"
-          signing_dir="$GITHUB_WORKSPACE/.ci-signing"
+          signing_dir="$RUNNER_TEMP/betterpak-signing"
           mkdir -p "$signing_dir"
-          trap 'rm -rf "$signing_dir"' EXIT
           printf '%s' "$BETTERPAK_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$signing_dir/betterpak-release.p12"
+          chmod 600 "$signing_dir/betterpak-release.p12"
           keytool -list \
             -storetype PKCS12 \
             -keystore "$signing_dir/betterpak-release.p12" \
             -storepass "$BETTERPAK_ANDROID_STORE_PASSWORD" \
             -alias "$BETTERPAK_ANDROID_KEY_ALIAS" > /dev/null
-          unsigned_apk="$(find "$GITHUB_WORKSPACE/app/build/outputs/apk/release" -maxdepth 1 -type f -name '*unsigned.apk' -print -quit)"
-          test -n "$unsigned_apk"
+          {
+            echo "BETTERPAK_KEYSTORE_PATH=$signing_dir/betterpak-release.p12"
+            echo "BETTERPAK_KEYSTORE_PASSWORD=$BETTERPAK_ANDROID_STORE_PASSWORD"
+            echo "BETTERPAK_KEY_ALIAS=$BETTERPAK_ANDROID_KEY_ALIAS"
+            echo "BETTERPAK_KEY_PASSWORD=$BETTERPAK_ANDROID_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Build signed release APK and AAB
+        run: gradle --no-daemon --max-workers=1 assembleRelease bundleRelease
+
+      - name: Verify release signatures
+        run: |
+          set -euo pipefail
+          apk="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
+          aab="$GITHUB_WORKSPACE/app/build/outputs/bundle/release/app-release.aab"
+          mapping="$GITHUB_WORKSPACE/app/build/outputs/mapping/release/mapping.txt"
+          test -s "$apk"
+          test -s "$aab"
+          test -s "$mapping"
           apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
           test -x "$apksigner"
-          signed_apk="$signing_dir/app-release.apk"
-          "$apksigner" sign \
-            --ks "$signing_dir/betterpak-release.p12" \
-            --ks-pass "env:BETTERPAK_ANDROID_STORE_PASSWORD" \
-            --ks-key-alias "$BETTERPAK_ANDROID_KEY_ALIAS" \
-            --key-pass "env:BETTERPAK_ANDROID_KEY_PASSWORD" \
-            --out "$signed_apk" \
-            "$unsigned_apk"
-          mv "$signed_apk" "$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
-          "$apksigner" verify --verbose --print-certs "$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk" > "$signing_dir/certificates.txt"
-          actual_fingerprint="$(sed -n 's/.*certificate SHA-256 digest: //p' "$signing_dir/certificates.txt" | head -n 1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          "$apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/betterpak-certificates.txt"
+          jarsigner -verify -strict "$aab" > /dev/null
+          actual_fingerprint="$(sed -n 's/.*certificate SHA-256 digest: //p' "$RUNNER_TEMP/betterpak-certificates.txt" | head -n 1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
           test -n "$actual_fingerprint"
           echo "BETTERPAK_CERTIFICATE_SHA256=$actual_fingerprint" >> "$GITHUB_ENV"
 
-      - name: Calculate checksums
-        run: sha256sum app/build/outputs/apk/release/app-release.apk > app/build/outputs/apk/release/SHA256SUMS.txt
+      - name: Archive release metadata and checksums
+        run: |
+          set -euo pipefail
+          archive_dir="$GITHUB_WORKSPACE/app/build/outputs/release-archive"
+          mkdir -p "$archive_dir"
+          cp app/build/outputs/apk/release/app-release.apk "$archive_dir/"
+          cp app/build/outputs/bundle/release/app-release.aab "$archive_dir/"
+          cp app/build/outputs/mapping/release/mapping.txt "$archive_dir/"
+          (
+            cd "$archive_dir"
+            sha256sum app-release.apk app-release.aab mapping.txt > SHA256SUMS.txt
+          )
+          cat > "$archive_dir/RELEASE_METADATA.md" <<EOF
+          # BetterPak Release Metadata
+
+          - Version: ${GITHUB_REF_NAME}
+          - Commit: ${GITHUB_SHA}
+          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Test and lint command: gradle --no-daemon --max-workers=1 test lintRelease
+          - Android build command: gradle --no-daemon --max-workers=1 assembleRelease bundleRelease
+          - Signing certificate SHA-256: ${BETTERPAK_CERTIFICATE_SHA256}
+
+          ## Artifacts
+
+          | File | Bytes |
+          | --- | ---: |
+          | app-release.apk | $(stat -c '%s' "$archive_dir/app-release.apk") |
+          | app-release.aab | $(stat -c '%s' "$archive_dir/app-release.aab") |
+          | mapping.txt | $(stat -c '%s' "$archive_dir/mapping.txt") |
+
+          SHA-256 values are in SHA256SUMS.txt.
+
+          ## Known limitations
+
+          ZIP, RAR/RAR5 and 7z are supported. TAR, Zstandard and tar.zst are not included in this release. ZIP encryption and RAR creation remain unavailable.
+
+          ## Rollback
+
+          Remove the GitHub Release and revert distribution to the previous verified tag after checking the archived checksums and certificate fingerprint.
+          EOF
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: betterpak-release-${{ github.sha }}
           path: |
-            app/build/outputs/apk/release/app-release.apk
-            app/build/outputs/apk/release/SHA256SUMS.txt
+            app/build/outputs/release-archive/app-release.apk
+            app/build/outputs/release-archive/app-release.aab
+            app/build/outputs/release-archive/mapping.txt
+            app/build/outputs/release-archive/SHA256SUMS.txt
+            app/build/outputs/release-archive/RELEASE_METADATA.md
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
@@ -103,5 +153,8 @@ jobs:
           body: |
             Signing certificate SHA-256: `${{ env.BETTERPAK_CERTIFICATE_SHA256 }}`
           files: |
-            app/build/outputs/apk/release/app-release.apk
-            app/build/outputs/apk/release/SHA256SUMS.txt
+            app/build/outputs/release-archive/app-release.apk
+            app/build/outputs/release-archive/app-release.aab
+            app/build/outputs/release-archive/mapping.txt
+            app/build/outputs/release-archive/SHA256SUMS.txt
+            app/build/outputs/release-archive/RELEASE_METADATA.md

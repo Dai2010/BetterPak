@@ -1,8 +1,21 @@
+import java.io.File
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+val releaseKeystorePath = providers.environmentVariable("BETTERPAK_KEYSTORE_PATH")
+val releaseKeystorePassword = providers.environmentVariable("BETTERPAK_KEYSTORE_PASSWORD")
+val releaseKeyAlias = providers.environmentVariable("BETTERPAK_KEY_ALIAS")
+val releaseKeyPassword = providers.environmentVariable("BETTERPAK_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { it.isPresent }
 
 android {
     namespace = "com.dai2010.betterpak"
@@ -12,13 +25,28 @@ android {
         applicationId = "com.dai2010.betterpak"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.0.3"
+        versionCode = 4
+        versionName = "0.0.4"
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("ciRelease") {
+                storeFile = file(releaseKeystorePath.get())
+                storeType = "PKCS12"
+                storePassword = releaseKeystorePassword.get()
+                keyAlias = releaseKeyAlias.get()
+                keyPassword = releaseKeyPassword.get()
+            }
+        }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("ciRelease")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -41,6 +69,17 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+}
+
+gradle.taskGraph.whenReady {
+    if (allTasks.any { it.name in setOf("assembleRelease", "bundleRelease") }) {
+        check(hasReleaseSigning) {
+            "Release 构建必须提供 BETTERPAK_KEYSTORE_PATH、BETTERPAK_KEYSTORE_PASSWORD、BETTERPAK_KEY_ALIAS 和 BETTERPAK_KEY_PASSWORD"
+        }
+        check(File(releaseKeystorePath.get()).isFile) {
+            "BETTERPAK_KEYSTORE_PATH 不存在或不是文件"
+        }
     }
 }
 

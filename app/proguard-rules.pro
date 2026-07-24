@@ -1,2 +1,3 @@
-# Keep the initial release build easy to inspect. Shrinking can be enabled after
-# the archive engines and JNI boundaries have dedicated release tests.
+-keep class com.github.junrar.** { *; }
+-keep class org.apache.commons.compress.** { *; }
+-keep class org.tukaani.xz.** { *; }
