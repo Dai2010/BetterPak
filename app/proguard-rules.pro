@@ -1,3 +1,7 @@
 -keep class com.github.junrar.** { *; }
 -keep class org.apache.commons.compress.** { *; }
 -keep class org.tukaani.xz.** { *; }
+-dontwarn com.github.luben.zstd.**
+-dontwarn org.brotli.dec.**
+-dontwarn org.objectweb.asm.**
+-dontwarn org.slf4j.**
