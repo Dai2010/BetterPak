@@ -1,0 +1,36 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@drawable/betterpak_icon"
+        android:label="@string/app_name"
+        android:roundIcon="@drawable/betterpak_icon"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.BetterPak">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent-filter>
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <data android:mimeType="application/zip" />
+            <data android:mimeType="application/x-rar-compressed" />
+            <data android:mimeType="application/x-7z-compressed" />
+            <data android:mimeType="application/octet-stream" />
+        </intent-filter>
+        <intent-filter>
+            <action android:name="android.intent.action.SEND" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <data android:mimeType="application/zip" />
+            <data android:mimeType="application/x-rar-compressed" />
+            <data android:mimeType="application/x-7z-compressed" />
+            <data android:mimeType="application/octet-stream" />
+        </intent-filter>
+        </activity>
+    </application>
+</manifest>

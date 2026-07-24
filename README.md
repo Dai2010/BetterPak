@@ -1,2 +1,14 @@
 # BetterPak
 一个方便，快速的压缩包管理器
+
+## 当前进度
+
+- 首轮接入 ZIP 浏览、解压、创建、文本/图片/音视频预览，以及 RAR/RAR5 和 7z 浏览、解压、预览。
+- 主页区分创建、解压和预览；设置页提供跟随系统、浅色、深色和自定义 Material You 主题色。
+- 创建页和解压/预览页提供高级选项，包括密码、算法、压缩级别、线程、覆盖策略和安全限制；ZIP 创建支持 Deflate/仅存储，暂不支持 ZIP 加密。
+- 长任务支持进度、取消、临时文件替换和失败清理；创建页可选择文件或目录，预览页支持文本和图片安全预览。
+- 本机不要求 Android SDK；Release 构建通过 `.github/workflows/release.yml` 执行。
+
+Release 构建不会生成临时签名，必须提供 `BETTERPAK_KEYSTORE_PATH`、`BETTERPAK_KEYSTORE_PASSWORD`、`BETTERPAK_KEY_ALIAS` 和 `BETTERPAK_KEY_PASSWORD`。
+
+详细的功能路线、许可证边界和签名流程见 [PLAN.md](PLAN.md)。
