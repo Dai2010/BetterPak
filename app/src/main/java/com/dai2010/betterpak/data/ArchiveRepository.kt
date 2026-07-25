@@ -109,7 +109,7 @@ object ArchiveRepository : ArchiveEngine {
     override suspend fun list(
         context: Context,
         uri: Uri,
-        password: String = "",
+        password: String,
     ): Result<List<ArchiveItem>> = operation {
         withContext(Dispatchers.IO) {
             val format = detectFormat(context, uri)
@@ -138,8 +138,8 @@ object ArchiveRepository : ArchiveEngine {
         archiveUri: Uri,
         destinationUri: Uri,
         selectedPaths: Set<String>?,
-        options: ArchiveExtractOptions = ArchiveExtractOptions(),
-        onProgress: suspend (ArchiveProgress) -> Unit = {},
+        options: ArchiveExtractOptions,
+        onProgress: suspend (ArchiveProgress) -> Unit,
     ): Result<Int> = operation {
         withContext(Dispatchers.IO) {
             require(options.maxEntries > 0) { "最多处理文件数必须大于 0" }
@@ -217,8 +217,8 @@ object ArchiveRepository : ArchiveEngine {
         context: Context,
         inputUris: List<Uri>,
         outputUri: Uri,
-        options: ArchiveCreateOptions = ArchiveCreateOptions(algorithm = CompressionAlgorithm.DEFLATE),
-        onProgress: suspend (ArchiveProgress) -> Unit = {},
+        options: ArchiveCreateOptions,
+        onProgress: suspend (ArchiveProgress) -> Unit,
     ): Result<Int> = operation {
         withContext(Dispatchers.IO) {
             require(inputUris.isNotEmpty()) { "请先选择要打包的文件或目录" }
@@ -284,8 +284,8 @@ object ArchiveRepository : ArchiveEngine {
         context: Context,
         inputUris: List<Uri>,
         outputUri: Uri,
-        options: ArchiveCreateOptions = ArchiveCreateOptions(),
-        onProgress: suspend (ArchiveProgress) -> Unit = {},
+        options: ArchiveCreateOptions,
+        onProgress: suspend (ArchiveProgress) -> Unit,
     ): Result<Int> = operation {
         withContext(Dispatchers.IO) {
             require(inputUris.isNotEmpty()) { "请先选择要打包的文件或目录" }
@@ -345,16 +345,16 @@ object ArchiveRepository : ArchiveEngine {
         context: Context,
         inputUris: List<Uri>,
         outputUri: Uri,
-        options: ArchiveCreateOptions = ArchiveCreateOptions(algorithm = CompressionAlgorithm.COPY),
-        onProgress: suspend (ArchiveProgress) -> Unit = {},
+        options: ArchiveCreateOptions,
+        onProgress: suspend (ArchiveProgress) -> Unit,
     ): Result<Int> = createTarArchive(context, inputUris, outputUri, false, options, onProgress)
 
     override suspend fun createTarZstandard(
         context: Context,
         inputUris: List<Uri>,
         outputUri: Uri,
-        options: ArchiveCreateOptions = ArchiveCreateOptions(algorithm = CompressionAlgorithm.COPY),
-        onProgress: suspend (ArchiveProgress) -> Unit = {},
+        options: ArchiveCreateOptions,
+        onProgress: suspend (ArchiveProgress) -> Unit,
     ): Result<Int> = createTarArchive(context, inputUris, outputUri, true, options, onProgress)
 
     private suspend fun createTarArchive(
@@ -436,8 +436,8 @@ object ArchiveRepository : ArchiveEngine {
         context: Context,
         uri: Uri,
         path: String,
-        password: String = "",
-        maxBytes: Long = MAX_PREVIEW_BYTES,
+        password: String,
+        maxBytes: Long,
     ): Result<ArchivePreview> = operation {
         withContext(Dispatchers.IO) {
             val normalizedPath = ArchivePath.normalize(path) ?: error("条目路径不安全")
@@ -489,8 +489,8 @@ object ArchiveRepository : ArchiveEngine {
         context: Context,
         archiveUri: Uri,
         path: String,
-        password: String = "",
-        maxBytes: Long = 50L * 1024L * 1024L * 1024L,
+        password: String,
+        maxBytes: Long,
     ): Result<File> = operation {
         withContext(Dispatchers.IO) {
             val normalizedPath = ArchivePath.normalize(path) ?: error("条目路径不安全")
@@ -519,8 +519,8 @@ object ArchiveRepository : ArchiveEngine {
         context: Context,
         archiveUri: Uri,
         path: String,
-        password: String = "",
-        maxBytes: Long = MAX_STREAM_EXPANDED_BYTES,
+        password: String,
+        maxBytes: Long,
     ): Result<File> = operation {
         withContext(Dispatchers.IO) {
             val normalizedPath = ArchivePath.normalize(path) ?: error("条目路径不安全")
