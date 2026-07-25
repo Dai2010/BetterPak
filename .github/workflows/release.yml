@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag, for example v0.0.4
+        description: Release tag, for example v0.0.5
         required: true
-        default: v0.0.4
+        default: v0.0.5
   push:
     tags:
       - "v*"
@@ -72,27 +72,31 @@ jobs:
             echo "BETTERPAK_KEY_PASSWORD=$BETTERPAK_ANDROID_KEY_PASSWORD"
           } >> "$GITHUB_ENV"
 
-      - name: Build signed release APK and AAB
-        run: gradle --no-daemon --max-workers=1 assembleRelease bundleRelease
+      - name: Build signed release APKs
+        run: gradle --no-daemon --max-workers=1 assembleRelease
 
       - name: Verify release signatures
         run: |
           set -euo pipefail
-          apk="$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk"
-          aab="$GITHUB_WORKSPACE/app/build/outputs/bundle/release/app-release.aab"
-          mapping="$GITHUB_WORKSPACE/app/build/outputs/mapping/release/mapping.txt"
-          test -s "$apk"
-          test -s "$aab"
-          test -s "$mapping"
+          apk_dir="$GITHUB_WORKSPACE/app/build/outputs/apk/release"
+          expected_abis=(arm64-v8a armeabi-v7a x86 universal)
           apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
           test -x "$apksigner"
-          "$apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/betterpak-certificates.txt"
-          actual_fingerprint="$(sed -n 's/.*certificate SHA-256 digest: //p' "$RUNNER_TEMP/betterpak-certificates.txt" | head -n 1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
-          test -n "$actual_fingerprint"
-          jarsigner -verify -verbose -certs "$aab" > "$RUNNER_TEMP/betterpak-aab-certificates.txt"
-          aab_fingerprint="$(keytool -printcert -jarfile "$aab" | sed -n 's/.*SHA256: //p' | head -n 1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
-          test -n "$aab_fingerprint"
-          test "$actual_fingerprint" = "$aab_fingerprint"
+          fingerprints=()
+          for abi in "${expected_abis[@]}"; do
+            apk="$apk_dir/app-${abi}-release.apk"
+            test -s "$apk"
+            certificate_file="$RUNNER_TEMP/betterpak-${abi}-certificates.txt"
+            "$apksigner" verify --verbose --print-certs "$apk" > "$certificate_file"
+            fingerprint="$(sed -n 's/.*certificate SHA-256 digest: //p' "$certificate_file" | head -n 1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+            test -n "$fingerprint"
+            fingerprints+=("$fingerprint")
+          done
+          test "${fingerprints[0]}" = "${fingerprints[1]}"
+          test "${fingerprints[0]}" = "${fingerprints[2]}"
+          test "${fingerprints[0]}" = "${fingerprints[3]}"
+          test ! -d "$GITHUB_WORKSPACE/app/build/outputs/bundle"
+          actual_fingerprint="${fingerprints[0]}"
           echo "BETTERPAK_CERTIFICATE_SHA256=$actual_fingerprint" >> "$GITHUB_ENV"
 
       - name: Archive release metadata and checksums
@@ -100,12 +104,10 @@ jobs:
           set -euo pipefail
           archive_dir="$GITHUB_WORKSPACE/app/build/outputs/release-archive"
           mkdir -p "$archive_dir"
-          cp app/build/outputs/apk/release/app-release.apk "$archive_dir/"
-          cp app/build/outputs/bundle/release/app-release.aab "$archive_dir/"
-          cp app/build/outputs/mapping/release/mapping.txt "$archive_dir/"
+          cp app/build/outputs/apk/release/app-*-release.apk "$archive_dir/"
           (
             cd "$archive_dir"
-            sha256sum app-release.apk app-release.aab mapping.txt > SHA256SUMS.txt
+            sha256sum app-*-release.apk > SHA256SUMS.txt
           )
           cat > "$archive_dir/RELEASE_METADATA.md" <<EOF
           # BetterPak Release Metadata
@@ -114,22 +116,24 @@ jobs:
           - Commit: ${GITHUB_SHA}
           - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           - Test and lint command: gradle --no-daemon --max-workers=1 test lintRelease
-          - Android build command: gradle --no-daemon --max-workers=1 assembleRelease bundleRelease
+          - Android build command: gradle --no-daemon --max-workers=1 assembleRelease
           - Signing certificate SHA-256: ${BETTERPAK_CERTIFICATE_SHA256}
 
           ## Artifacts
 
           | File | Bytes |
           | --- | ---: |
-          | app-release.apk | $(stat -c '%s' "$archive_dir/app-release.apk") |
-          | app-release.aab | $(stat -c '%s' "$archive_dir/app-release.aab") |
-          | mapping.txt | $(stat -c '%s' "$archive_dir/mapping.txt") |
+          EOF
+          for apk in "$archive_dir"/app-*-release.apk; do
+            printf '| %s | %s |\n' "$(basename "$apk")" "$(stat -c '%s' "$apk")" >> "$archive_dir/RELEASE_METADATA.md"
+          done
+          cat >> "$archive_dir/RELEASE_METADATA.md" <<EOF
 
           SHA-256 values are in SHA256SUMS.txt.
 
           ## Known limitations
 
-          ZIP, RAR/RAR5 and 7z are supported. TAR, Zstandard and tar.zst are not included in this release. ZIP encryption and RAR creation remain unavailable.
+          ZIP, RAR/RAR5, 7z, TAR, Zstandard and tar.zst are included. ZIP/TAR/Zstandard password encryption and RAR creation remain unavailable. AAB is intentionally not produced by this workflow.
 
           ## Rollback
 
@@ -141,9 +145,7 @@ jobs:
         with:
           name: betterpak-release-${{ github.sha }}
           path: |
-            app/build/outputs/release-archive/app-release.apk
-            app/build/outputs/release-archive/app-release.aab
-            app/build/outputs/release-archive/mapping.txt
+            app/build/outputs/release-archive/app-*-release.apk
             app/build/outputs/release-archive/SHA256SUMS.txt
             app/build/outputs/release-archive/RELEASE_METADATA.md
 
@@ -156,8 +158,6 @@ jobs:
           body: |
             Signing certificate SHA-256: `${{ env.BETTERPAK_CERTIFICATE_SHA256 }}`
           files: |
-            app/build/outputs/release-archive/app-release.apk
-            app/build/outputs/release-archive/app-release.aab
-            app/build/outputs/release-archive/mapping.txt
+            app/build/outputs/release-archive/app-*-release.apk
             app/build/outputs/release-archive/SHA256SUMS.txt
             app/build/outputs/release-archive/RELEASE_METADATA.md

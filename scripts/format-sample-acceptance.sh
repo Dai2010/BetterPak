@@ -64,7 +64,7 @@ expect_output() {
     local label="$1"
     local expected_text="$2"
     shift 2
-    if "$@" 2>/dev/null | grep -Fq -- "$expected_text"; then
+    if "$@" 2>/dev/null | grep -F -- "$expected_text" >/dev/null; then
         pass "$label"
     else
         fail "$label"
@@ -117,7 +117,7 @@ with source_path.open("rb") as encoded, destination_path.open("wb") as decoded:
 PY
 }
 
-for command_name in awk grep unzip zip 7z truncate; do
+for command_name in awk grep unzip zip 7z tar zstd truncate; do
     require_command "$command_name"
 done
 if [[ "$skip_public_samples" == "0" ]]; then
@@ -179,6 +179,10 @@ printf 'plain\n' > "$input_directory/plain.txt"
     cd "$workdir"
     zip -qr -UN=UTF8 local.zip input
     7z a -bd -t7z local.7z input >/dev/null
+    tar -cf local.tar input
+    zstd -q -f local.tar -o local.tar.zst
+    printf 'single zstandard stream\n' > single.txt
+    zstd -q -f single.txt -o single.txt.zst
 )
 
 generated_password="fixture-${BASHPID}-${RANDOM}"
@@ -190,15 +194,28 @@ generated_password="fixture-${BASHPID}-${RANDOM}"
 expect_success "ZIP created archive opens in unzip" unzip -t "$workdir/local.zip"
 expect_success "ZIP created archive opens in 7z" 7z t "$workdir/local.zip"
 expect_success "7z created archive opens in 7z" 7z t "$workdir/local.7z"
+expect_success "TAR created archive opens in tar" tar -tf "$workdir/local.tar"
+expect_success "TAR.ZST created archive opens in tar" tar -tf "$workdir/local.tar.zst"
+expect_success "Zstandard single stream passes frame check" zstd -q -t "$workdir/single.txt.zst"
 expect_success "7z password archive opens with generated password" 7z t -p"$generated_password" "$workdir/local-password.7z"
 expect_failure "7z password archive rejects wrong password" 7z t -pwrong "$workdir/local-password.7z"
 expect_output "ZIP keeps Chinese directory" "中文目录/" unzip -Z1 "$workdir/local.zip"
 expect_output "ZIP keeps zero-byte filename" "零字节.bin" unzip -Z1 "$workdir/local.zip"
 expect_output "ZIP keeps empty directory" "空目录/" unzip -Z1 "$workdir/local.zip"
+expect_output "TAR keeps Chinese filename" "说明.txt" tar -tf "$workdir/local.tar"
+expect_output "TAR keeps zero-byte filename" "零字节.bin" tar -tf "$workdir/local.tar"
 
 cp "$workdir/local.zip" "$workdir/corrupt.zip"
 truncate -s -7 "$workdir/corrupt.zip"
 expect_failure "corrupt ZIP is rejected" unzip -t "$workdir/corrupt.zip"
+
+cp "$workdir/local.tar.zst" "$workdir/corrupt.tar.zst"
+truncate -s -7 "$workdir/corrupt.tar.zst"
+expect_failure "corrupt TAR.ZST is rejected" zstd -q -t "$workdir/corrupt.tar.zst"
+
+cp "$workdir/single.txt.zst" "$workdir/corrupt.zst"
+truncate -s -7 "$workdir/corrupt.zst"
+expect_failure "corrupt Zstandard frame is rejected" zstd -q -t "$workdir/corrupt.zst"
 
 if [[ "$skip_public_samples" == "0" ]]; then
     cp "$sample_directory/test_read_format_rar5_unicode.rar" "$workdir/corrupt.rar"

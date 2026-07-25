@@ -5,16 +5,17 @@
 验收脚本使用 `libarchive` 官方测试数据，覆盖：
 
 - ZIP、RAR4、RAR5 和 7z 的浏览基准。
+- TAR、Zstandard 单流和 TAR+Zstandard 的本地跨工具互操作。
 - 中文文件名、目录、空目录、空文件和零字节文件。
 - RAR4、RAR5、7z 密码包的正确密码、错误密码和固实包。
 - ZIP、RAR5 和 7z 损坏包的失败处理。
-- 本地生成 ZIP/7z 后由 `unzip` 与 `7z` 互相校验；公开 RAR 样本由 `unrar` 验证。
+- 本地生成 ZIP/7z/TAR/TAR.ZST/`.zst` 后由 `unzip`、`7z`、`tar` 和 `zstd` 互相校验；公开 RAR 样本由 `unrar` 验证。
 
 样本只包含上游公开测试内容；下载的 `.uu` 文件、解码后的归档、生成归档和损坏副本都位于 `mktemp` 创建的临时目录，脚本退出时自动删除。
 
 ## 重复执行
 
-需要 `curl`、`python3`、`unzip`、`zip`、`7z`、`unrar`、`truncate` 和 `sha256sum`：
+需要 `curl`、`python3`、`unzip`、`zip`、`7z`、`tar`、`zstd`、`unrar`、`truncate` 和 `sha256sum`：
 
 ```sh
 ./scripts/format-sample-acceptance.sh
@@ -45,7 +46,7 @@ BETTERPAK_LIBARCHIVE_BASE=https://mirror.example/libarchive/test \
   ./scripts/format-sample-acceptance.sh
 ```
 
-如果网络不可用且没有公开样本，可显式只运行本地生成 ZIP/7z、密码、Unicode 路径和损坏 ZIP 检查。此模式不会执行公开 RAR/RAR5/7z 样本或损坏 RAR/7z 检查，输出也会明确标注为 local checks：
+如果网络不可用且没有公开样本，可显式只运行本地生成 ZIP/7z/TAR/Zstandard、密码、Unicode 路径和损坏流检查。此模式不会执行公开 RAR/RAR5/7z 样本或损坏 RAR/7z 检查，输出也会明确标注为 local checks：
 
 ```sh
 BETTERPAK_SKIP_PUBLIC_SAMPLES=1 ./scripts/format-sample-acceptance.sh
@@ -55,7 +56,7 @@ BETTERPAK_SKIP_PUBLIC_SAMPLES=1 ./scripts/format-sample-acceptance.sh
 
 ## 已有验收记录
 
-2026-07-24 UTC 通过 `ghfast.top` 代理在 Termux 中执行脚本，28 项检查全部通过，包含样本哈希、Unicode 路径、密码成功/失败、跨工具创建校验和损坏包拒绝。下载、解码、生成和损坏样本均已在脚本退出时删除。
+2026-07-25 UTC 在 Termux 中执行脚本，35 项检查全部通过，包含固定公开样本哈希、Unicode 路径、密码成功/失败、ZIP/7z/TAR/Zstandard 跨工具创建校验和损坏包拒绝。下载、解码、生成和损坏样本均已在脚本退出时删除。
 
 此前直接连接 `raw.githubusercontent.com` 曾因网络超时停止；脚本现会报告具体失败样本，并支持使用 `BETTERPAK_LIBARCHIVE_BASE` 指向代理/镜像或使用预先下载的样本目录复核。
 

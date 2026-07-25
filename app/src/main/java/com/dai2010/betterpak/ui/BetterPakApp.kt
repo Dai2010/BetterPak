@@ -243,7 +243,7 @@ private fun CreateScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var selectedUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var selectedFormat by rememberSaveable { mutableStateOf(ArchiveFormat.ZIP.name) }
-    var password by rememberSaveable { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
     var algorithm by rememberSaveable { mutableStateOf(CompressionAlgorithm.DEFLATE.name) }
     var compressionLevel by rememberSaveable { mutableIntStateOf(5) }
@@ -291,6 +291,20 @@ private fun CreateScreen(onBack: () -> Unit) {
                             pendingOptions,
                             onProgress = { progress = it },
                         )
+                        ArchiveFormat.TAR -> ArchiveRepository.createTar(
+                            context,
+                            selectedUris,
+                            outputUri,
+                            pendingOptions,
+                            onProgress = { progress = it },
+                        )
+                        ArchiveFormat.TAR_ZSTANDARD -> ArchiveRepository.createTarZstandard(
+                            context,
+                            selectedUris,
+                            outputUri,
+                            pendingOptions,
+                            onProgress = { progress = it },
+                        )
                         else -> Result.failure(IllegalArgumentException("暂不支持创建该格式"))
                     }
                     status = result.fold(
@@ -312,6 +326,14 @@ private fun CreateScreen(onBack: () -> Unit) {
     )
     val createSevenZOutput = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/x-7z-compressed"),
+        startCreate,
+    )
+    val createTarOutput = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/x-tar"),
+        startCreate,
+    )
+    val createTarZstandardOutput = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zstd"),
         startCreate,
     )
 
@@ -344,6 +366,24 @@ private fun CreateScreen(onBack: () -> Unit) {
                     onClick = { selectedFormat = ArchiveFormat.RAR.name },
                     enabled = false,
                     label = { Text("RAR（仅解压）") },
+                )
+                FilterChip(
+                    selected = selectedFormat == ArchiveFormat.TAR.name,
+                    onClick = {
+                        selectedFormat = ArchiveFormat.TAR.name
+                        algorithm = CompressionAlgorithm.COPY.name
+                        password = ""
+                    },
+                    label = { Text("TAR（可创建）") },
+                )
+                FilterChip(
+                    selected = selectedFormat == ArchiveFormat.TAR_ZSTANDARD.name,
+                    onClick = {
+                        selectedFormat = ArchiveFormat.TAR_ZSTANDARD.name
+                        algorithm = CompressionAlgorithm.COPY.name
+                        password = ""
+                    },
+                    label = { Text("TAR.ZST（可创建）") },
                 )
             }
             SectionTitle("2. 选择文件")
@@ -394,7 +434,7 @@ private fun CreateScreen(onBack: () -> Unit) {
                                 )
                             } else {
                                 Text(
-                                    "ZIP 不支持密码加密，不需要设置密码。",
+                                    "${ArchiveFormat.valueOf(selectedFormat).label} 不支持标准密码，不需要设置密码。",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -406,6 +446,8 @@ private fun CreateScreen(onBack: () -> Unit) {
                             Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 val algorithms = if (selectedFormat == ArchiveFormat.ZIP.name) {
                                     listOf(CompressionAlgorithm.DEFLATE, CompressionAlgorithm.COPY)
+                                } else if (selectedFormat == ArchiveFormat.TAR.name || selectedFormat == ArchiveFormat.TAR_ZSTANDARD.name) {
+                                    listOf(CompressionAlgorithm.COPY)
                                 } else {
                                     CompressionAlgorithm.entries
                                 }
@@ -434,6 +476,8 @@ private fun CreateScreen(onBack: () -> Unit) {
                             Text(
                                 if (selectedFormat == ArchiveFormat.ZIP.name) {
                                     "ZIP 使用 Deflate 或仅存储；线程数用于输入准备。"
+                                } else if (selectedFormat == ArchiveFormat.TAR.name || selectedFormat == ArchiveFormat.TAR_ZSTANDARD.name) {
+                                    "TAR 按顺序写入条目；TAR.ZST 额外使用 Zstandard 流压缩。密码和特殊条目不支持。"
                                 } else {
                                     "当前 7z 写入引擎按顺序写入压缩流，线程数用于输入准备；原生并行压缩引擎接入后会进一步利用该设置。"
                                 },
@@ -466,10 +510,12 @@ private fun CreateScreen(onBack: () -> Unit) {
                             threads = threads,
                         )
                         pendingFormat = selectedFormat
-                        if (selectedFormat == ArchiveFormat.ZIP.name) {
-                            createZipOutput.launch("betterpak.zip")
-                        } else {
-                            createSevenZOutput.launch("betterpak.7z")
+                        when (selectedFormat) {
+                            ArchiveFormat.ZIP.name -> createZipOutput.launch("betterpak.zip")
+                            ArchiveFormat.SEVEN_Z.name -> createSevenZOutput.launch("betterpak.7z")
+                            ArchiveFormat.TAR.name -> createTarOutput.launch("betterpak.tar")
+                            ArchiveFormat.TAR_ZSTANDARD.name -> createTarZstandardOutput.launch("betterpak.tar.zst")
+                            else -> status = "当前格式不支持创建"
                         }
                     }
                 },
@@ -478,7 +524,7 @@ private fun CreateScreen(onBack: () -> Unit) {
             ) {
                 Icon(Icons.Outlined.Archive, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("创建 ${if (selectedFormat == ArchiveFormat.ZIP.name) "ZIP" else "7z"} 压缩包")
+                Text("创建 ${ArchiveFormat.valueOf(selectedFormat).label} 压缩包")
             }
         }
     }
@@ -492,7 +538,7 @@ private fun ExtractScreen(onBack: () -> Unit) {
     var archiveUri by remember { mutableStateOf<Uri?>(null) }
     var archiveFormat by remember { mutableStateOf(ArchiveFormat.UNKNOWN) }
     var destinationUri by remember { mutableStateOf<Uri?>(null) }
-    var password by rememberSaveable { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
     var overwritePolicy by rememberSaveable { mutableStateOf(OverwritePolicy.REPLACE.name) }
     var maxEntriesText by rememberSaveable { mutableStateOf("100000") }
@@ -512,7 +558,7 @@ private fun ExtractScreen(onBack: () -> Unit) {
         if (!archiveFormat.supportsPassword) password = ""
         status = when {
             uri == null -> null
-            archiveFormat == ArchiveFormat.UNKNOWN -> "无法识别格式，请选择 ZIP、RAR 或 7z 文件"
+            archiveFormat == ArchiveFormat.UNKNOWN -> "无法识别格式，请选择 ZIP、RAR、7z、TAR 或 Zstandard 文件"
             else -> "已选择 ${archiveFormat.label} 压缩包"
         }
     }
@@ -529,7 +575,7 @@ private fun ExtractScreen(onBack: () -> Unit) {
             OutlinedButton(onClick = { pickArchive.launch(ArchiveRepository.supportedArchiveMimeTypes()) }, modifier = Modifier.fillMaxWidth()) {
                 Icon(Icons.Outlined.Archive, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text(if (archiveUri == null) "选择 ZIP、RAR 或 7z 压缩包" else "重新选择压缩包")
+                Text(if (archiveUri == null) "选择 ZIP、RAR、7z、TAR 或 Zstandard 文件" else "重新选择压缩包")
             }
             archiveUri?.let {
                 AssistChip(

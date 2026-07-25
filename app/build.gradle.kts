@@ -25,8 +25,17 @@ android {
         applicationId = "com.dai2010.betterpak"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.0.4"
+        versionCode = 5
+        versionName = "0.0.5"
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86")
+            isUniversalApk = true
+        }
     }
 
     signingConfigs {
@@ -73,7 +82,7 @@ android {
 }
 
 gradle.taskGraph.whenReady {
-    if (allTasks.any { it.name in setOf("assembleRelease", "bundleRelease") }) {
+    if (allTasks.any { it.name == "assembleRelease" }) {
         check(hasReleaseSigning) {
             "Release 构建必须提供 BETTERPAK_KEYSTORE_PATH、BETTERPAK_KEYSTORE_PASSWORD、BETTERPAK_KEY_ALIAS 和 BETTERPAK_KEY_PASSWORD"
         }
@@ -102,6 +111,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     implementation("org.apache.commons:commons-compress:1.27.1")
+    implementation("com.github.luben:zstd-jni:1.5.7-11")
     implementation("org.tukaani:xz:1.10")
     implementation("com.github.junrar:junrar:7.5.5")
 

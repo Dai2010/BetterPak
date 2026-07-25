@@ -1,13 +1,17 @@
 package com.dai2010.betterpak.ui
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaPlayer
 import android.net.Uri
-import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -29,10 +34,18 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.MusicNote
+import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -61,6 +74,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -72,6 +86,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.FileProvider
 import com.dai2010.betterpak.data.ArchiveRepository
 import com.dai2010.betterpak.domain.ArchiveExtractOptions
 import com.dai2010.betterpak.domain.ArchiveFormat
@@ -81,9 +96,13 @@ import com.dai2010.betterpak.domain.ArchiveProgress
 import com.dai2010.betterpak.domain.OverwritePolicy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.roundToInt
+
+private const val MAX_PREVIEW_IMAGE_DIMENSION = 8192
+private const val MAX_PREVIEW_IMAGE_PIXELS = 20_000_000L
 
 data class PreviewRequest(
     val archiveUri: Uri,
@@ -106,7 +125,7 @@ fun PreviewSetupScreen(
         mutableStateOf(initialArchiveUri?.let { ArchiveRepository.detectFormat(context, it) } ?: ArchiveFormat.UNKNOWN)
     }
     var destinationUri by remember { mutableStateOf<Uri?>(null) }
-    var password by rememberSaveable { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
     var overwritePolicy by rememberSaveable { mutableStateOf(OverwritePolicy.REPLACE.name) }
     var maxEntriesText by rememberSaveable { mutableStateOf("100000") }
@@ -127,7 +146,7 @@ fun PreviewSetupScreen(
         if (!format.supportsPassword) password = ""
         status = when {
             uri == null -> null
-            format == ArchiveFormat.UNKNOWN -> "无法识别格式，请选择 ZIP、RAR 或 7z 文件"
+            format == ArchiveFormat.UNKNOWN -> "无法识别格式，请选择 ZIP、RAR、7z、TAR 或 Zstandard 文件"
             else -> "已选择 ${format.label}，完成设置后开始预览"
         }
     }
@@ -161,7 +180,7 @@ fun PreviewSetupScreen(
             ) {
                 Icon(Icons.Outlined.Archive, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text(if (archiveUri == null) "选择 ZIP、RAR 或 7z 压缩包" else "重新选择压缩包")
+                Text(if (archiveUri == null) "选择 ZIP、RAR、7z、TAR 或 Zstandard 文件" else "重新选择压缩包")
             }
             archiveUri?.let {
                 AssistChip(
@@ -270,7 +289,7 @@ fun PreviewSetupScreen(
                     val uri = archiveUri
                     when {
                         uri == null -> status = "请先选择压缩包"
-                        archiveFormat == ArchiveFormat.UNKNOWN -> status = "请选择 ZIP、RAR 或 7z 压缩包"
+                        archiveFormat == ArchiveFormat.UNKNOWN -> status = "请选择 ZIP、RAR、7z、TAR 或 Zstandard 文件"
                         else -> onOpenPreview(
                             PreviewRequest(
                                 archiveUri = uri,
@@ -302,18 +321,23 @@ fun PreviewSetupScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var items by remember(request) { mutableStateOf<List<ArchiveItem>>(emptyList()) }
     var selectedPaths by remember(request) { mutableStateOf<Set<String>>(emptySet()) }
+    var selectionMode by remember(request) { mutableStateOf(false) }
     var destinationUri by remember(request) { mutableStateOf(request.destinationUri) }
     var loading by remember(request) { mutableStateOf(true) }
     var previewLoading by remember { mutableStateOf(false) }
     var previewItem by remember { mutableStateOf<ArchivePreview?>(null) }
     var previewErrorPath by remember { mutableStateOf<String?>(null) }
+    var fallbackPath by remember { mutableStateOf<String?>(null) }
+    var fallbackError by remember { mutableStateOf<String?>(null) }
+    var pendingExtractPath by remember { mutableStateOf<String?>(null) }
+    var fallbackJob by remember { mutableStateOf<Job?>(null) }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
     var progress by remember { mutableStateOf<ArchiveProgress?>(null) }
@@ -322,9 +346,75 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
     val pickDestination = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let { ArchiveRepository.persistUriPermission(context, it) }
         destinationUri = uri
+        val path = pendingExtractPath
+        if (uri != null && path != null) {
+            pendingExtractPath = null
+            previewItem = null
+            previewErrorPath = null
+            operationJob = startPreviewExtraction(
+                context = context,
+                scope = scope,
+                request = request,
+                destinationUri = uri,
+                selectedPaths = setOf(path),
+                allFiles = false,
+                setBusy = { busy = it },
+                setStatus = { status = it },
+                setProgress = { progress = it },
+            )
+        }
+    }
+
+    fun openExtractedFile(file: File) {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, ArchiveRepository.mimeTypeForPath(file.name))
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            context.startActivity(intent)
+            status = "已使用系统应用打开 ${file.name}"
+        } catch (_: ActivityNotFoundException) {
+            status = "文件已解压到应用内部存储，但没有可打开此类型的应用"
+        }
+    }
+
+    fun extractAndOpen(path: String) {
+        fallbackPath = path
+        fallbackError = null
+        previewErrorPath = null
+        previewLoading = true
+        fallbackJob?.cancel()
+        fallbackJob = scope.launch {
+            try {
+                val result = ArchiveRepository.extractEntryToInternalStorage(
+                    context = context,
+                    archiveUri = request.archiveUri,
+                    path = path,
+                    password = request.password,
+                    maxBytes = request.extractOptions.maxExpandedBytes,
+                )
+                result.fold(
+                    onSuccess = { file ->
+                        openExtractedFile(file)
+                        fallbackPath = null
+                        previewLoading = false
+                    },
+                    onFailure = { error ->
+                        fallbackError = error.message ?: "无法解压此文件"
+                        previewErrorPath = path
+                        fallbackPath = null
+                        previewLoading = false
+                    },
+                )
+            } finally {
+                ArchiveRepository.cleanupTemporaryFiles(context)
+                fallbackJob = null
+            }
+        }
     }
 
     LaunchedEffect(request) {
+        ArchiveRepository.initializeAppStorage(context)
         val result = ArchiveRepository.list(context, request.archiveUri, request.password)
         loading = false
         result.fold(
@@ -339,31 +429,41 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
     }
 
     fun openPreview(item: ArchiveItem) {
+        if (item.isDirectory) {
+            status = "目录：${item.path}"
+            return
+        }
         previewLoading = true
+        fallbackPath = item.path
         status = "正在预览 ${item.path}…"
         scope.launch {
             val result = ArchiveRepository.preview(context, request.archiveUri, item.path, request.password)
-            previewLoading = false
             result.fold(
                 onSuccess = {
                     previewItem = it
                     previewErrorPath = null
+                    fallbackPath = null
+                    fallbackError = null
+                    previewLoading = false
                     status = null
                 },
                 onFailure = {
                     previewItem = null
-                    previewErrorPath = item.path
                     status = null
+                    extractAndOpen(item.path)
                 },
             )
         }
     }
 
+    fun toggleSelection(path: String) {
+        selectedPaths = if (selectedPaths.contains(path)) selectedPaths - path else selectedPaths + path
+    }
+
     fun extractPath(path: String) {
         if (destinationUri == null) {
-            status = "请先选择解压目标目录"
-            previewItem = null
-            previewErrorPath = null
+            pendingExtractPath = path
+            pickDestination.launch(null)
             return
         }
         previewItem = null
@@ -381,15 +481,23 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
         )
     }
 
-    if (previewItem != null || previewErrorPath != null) {
+    if (previewItem != null || previewErrorPath != null || fallbackPath != null) {
         PreviewDetailScreen(
             item = previewItem,
             errorPath = previewErrorPath,
+            fallbackPath = fallbackPath,
+            fallbackLoading = fallbackPath != null && previewLoading,
+            fallbackError = fallbackError,
             onBack = {
+                fallbackJob?.cancel()
                 previewItem = null
                 previewErrorPath = null
+                fallbackPath = null
+                fallbackError = null
+                previewLoading = false
             },
             onExtract = { path -> extractPath(path) },
+            onFallback = { path -> extractAndOpen(path) },
         )
         return
     }
@@ -402,7 +510,11 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
             ) {
                 Text("压缩包内容", style = MaterialTheme.typography.headlineSmall)
                 Text(
-                    "点击文件右侧的预览图标打开独立预览界面；勾选文件仅用于解压。",
+                    if (selectionMode) {
+                        "已进入选择模式，点击文件切换选择；点击完成返回浏览。"
+                    } else {
+                        "点击文件打开独立预览界面；长按文件进入选择模式。"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -428,13 +540,26 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Text("${items.size} 个条目", style = MaterialTheme.typography.titleMedium)
-                    TextButton(onClick = {
-                        val filePaths = items.filterNot { it.isDirectory }.map { it.path }.toSet()
-                        selectedPaths = if (selectedPaths == filePaths) emptySet() else filePaths
-                    }) {
-                        val fileCount = items.count { !it.isDirectory }
-                        Text(if (selectedPaths.size == fileCount) "取消全选" else "全选文件")
+                    Text(
+                        if (selectionMode) "已选择 ${selectedPaths.size} 项" else "${items.size} 个条目",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (selectionMode) {
+                            TextButton(onClick = {
+                                val filePaths = items.filterNot { it.isDirectory }.map { it.path }.toSet()
+                                selectedPaths = if (selectedPaths == filePaths) emptySet() else filePaths
+                            }) {
+                                val fileCount = items.count { !it.isDirectory }
+                                Text(if (selectedPaths.size == fileCount) "取消全选" else "全选")
+                            }
+                            TextButton(onClick = {
+                                selectionMode = false
+                                selectedPaths = emptySet()
+                            }) {
+                                Text("完成")
+                            }
+                        }
                     }
                 }
                 HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
@@ -444,37 +569,55 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
                 contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                items(items = items, key = { it.path }) { item ->
+                items(
+                    items = items.sortedWith(compareBy<ArchiveItem>({ !it.isDirectory }, { it.path.lowercase() })),
+                    key = { it.path },
+                ) { item ->
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .combinedClickable(
+                                onClick = {
+                                    if (selectionMode) toggleSelection(item.path) else openPreview(item)
+                                },
+                                onLongClick = {
+                                    if (!selectionMode) {
+                                        selectionMode = true
+                                        selectedPaths = setOf(item.path)
+                                    } else {
+                                        toggleSelection(item.path)
+                                    }
+                                },
+                            )
+                            .padding(vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Checkbox(
-                            checked = selectedPaths.contains(item.path),
-                            onCheckedChange = { checked ->
-                                selectedPaths = if (checked) selectedPaths + item.path else selectedPaths - item.path
-                            },
-                            enabled = !item.isDirectory && !busy,
-                        )
+                        if (selectionMode) {
+                            Checkbox(
+                                checked = selectedPaths.contains(item.path),
+                                onCheckedChange = { toggleSelection(item.path) },
+                                enabled = !busy,
+                            )
+                        }
+                        PreviewFileIcon(item.path, item.isDirectory)
+                        Spacer(Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(item.path, maxLines = 2)
+                            Text(item.path.substringAfterLast('/'), maxLines = 1)
                             Text(
-                                if (item.isDirectory) "目录" else previewFormatSize(item.size),
+                                if (item.isDirectory) {
+                                    item.path.substringBeforeLast('/', "压缩包根目录")
+                                } else {
+                                    "${previewFormatSize(item.size)} · ${item.path.substringBeforeLast('/', "根目录")}"
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        if (!item.isDirectory) {
-                            IconButton(
-                                onClick = { openPreview(item) },
-                                enabled = !previewLoading && !busy,
-                            ) {
-                                Icon(
-                                    Icons.Outlined.Visibility,
-                                    contentDescription = "预览 ${item.path}",
-                                )
-                            }
-                        }
+                        Icon(
+                            Icons.Outlined.Visibility,
+                            contentDescription = if (item.isDirectory) null else "预览 ${item.path}",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
             }
@@ -485,7 +628,7 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
                         Spacer(Modifier.width(8.dp))
                         Text(if (destinationUri == null) "选择解压目标目录" else "已选择目标目录")
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    if (selectionMode) Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                         OutlinedButton(
                             onClick = {
                                 operationJob = startPreviewExtraction(
@@ -527,76 +670,125 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
     }
 }
 
+@Composable
+private fun PreviewFileIcon(path: String, isDirectory: Boolean) {
+    val mimeType = ArchiveRepository.mimeTypeForPath(path)
+    val icon = when {
+        isDirectory -> Icons.Outlined.Folder
+        mimeType.startsWith("image/") -> Icons.Outlined.Image
+        mimeType.startsWith("audio/") -> Icons.Outlined.MusicNote
+        mimeType.startsWith("video/") -> Icons.Outlined.Movie
+        else -> Icons.Outlined.Description
+    }
+    Icon(
+        icon,
+        contentDescription = if (isDirectory) "目录" else "文件",
+        modifier = Modifier.size(40.dp),
+        tint = if (isDirectory) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PreviewDetailScreen(
     item: ArchivePreview?,
     errorPath: String?,
+    fallbackPath: String?,
+    fallbackLoading: Boolean,
+    fallbackError: String?,
     onBack: () -> Unit,
     onExtract: (String) -> Unit,
+    onFallback: (String) -> Unit,
 ) {
+    val displayPath = item?.path ?: errorPath ?: fallbackPath
+    var fallbackRequested by remember(displayPath) { mutableStateOf(false) }
+
+    fun requestFallback() {
+        val path = displayPath ?: return
+        if (!fallbackRequested) {
+            fallbackRequested = true
+            onFallback(path)
+        }
+    }
+
     Scaffold(topBar = { PreviewBackTopBar("文件预览", onBack) }) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .verticalScroll(rememberScrollState())
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            if (item != null) {
-                Text(item.path, style = MaterialTheme.typography.titleLarge)
-                Text(
-                    when {
-                        item.text != null -> "文本文件"
-                        item.mimeType.startsWith("image/") -> "图片文件"
-                        item.mimeType.startsWith("audio/") -> "音频文件"
-                        item.mimeType.startsWith("video/") -> "视频文件"
-                        else -> item.mimeType
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                when {
-                    item.text != null -> Text(
-                        item.text,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(420.dp)
-                            .verticalScroll(rememberScrollState()),
+            Column(
+                modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                if (displayPath != null) {
+                    PreviewFileIcon(displayPath, isDirectory = false)
+                    Text(displayPath, style = MaterialTheme.typography.titleLarge)
+                }
+                if (item != null) {
+                    Text(
+                        when {
+                            item.text != null -> "文本文件"
+                            item.mimeType.startsWith("image/") -> "图片文件"
+                            item.mimeType.startsWith("audio/") -> "音频文件"
+                            item.mimeType.startsWith("video/") -> "视频文件"
+                            else -> item.mimeType
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    item.mimeType.startsWith("audio/") || item.mimeType.startsWith("video/") -> {
-                        PreviewMediaContent(item)
-                    }
-                    item.bytes != null -> {
-                        val bitmap = remember(item.bytes) {
-                            BitmapFactory.decodeByteArray(item.bytes, 0, item.bytes.size)
+                    when {
+                        item.text != null -> Text(
+                            item.text,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(420.dp)
+                                .verticalScroll(rememberScrollState()),
+                        )
+                        item.mimeType.startsWith("audio/") || item.mimeType.startsWith("video/") -> {
+                            PreviewMediaContent(item, onPlaybackError = ::requestFallback)
                         }
-                        if (bitmap != null) {
-                            Image(
-                                bitmap = bitmap.asImageBitmap(),
-                                contentDescription = item.path,
-                                modifier = Modifier.fillMaxWidth().height(420.dp),
-                            )
-                        } else {
-                            Text("图片无法解码，请选择解压")
+                        item.bytes != null -> {
+                            val bitmap = remember(item.bytes) { decodePreviewBitmap(item.bytes) }
+                            if (bitmap != null) {
+                                Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = item.path,
+                                    modifier = Modifier.fillMaxWidth().height(420.dp),
+                                )
+                            } else {
+                                LaunchedEffect(item.path) { requestFallback() }
+                                Text("图片无法在应用内解码，正在使用系统应用打开…")
+                            }
+                        }
+                        else -> {
+                            LaunchedEffect(item.path) { requestFallback() }
+                            Text("该文件无法在应用内预览，正在准备系统应用打开…")
                         }
                     }
-                    else -> Text("该文件没有可显示的预览内容")
+                } else if (fallbackLoading) {
+                    Text("无法在应用内预览", style = MaterialTheme.typography.headlineSmall)
+                    Text("正在解压并使用系统应用打开…")
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                } else if (errorPath != null) {
+                    Text("无法预览此文件", style = MaterialTheme.typography.headlineSmall)
+                    Text("当前版本无法安全预览此类型，请选择解压查看原文件。")
+                    if (fallbackError != null) {
+                        Text(fallbackError, color = MaterialTheme.colorScheme.error)
+                    }
                 }
-                Button(onClick = { onExtract(item.path) }, modifier = Modifier.fillMaxWidth()) {
+            }
+            if (displayPath != null) {
+                Button(
+                    onClick = { onExtract(displayPath) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !fallbackLoading,
+                ) {
                     Icon(Icons.Outlined.ArrowDownward, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("解压此文件")
-                }
-            } else if (errorPath != null) {
-                Text("无法预览此文件", style = MaterialTheme.typography.headlineSmall)
-                Text(errorPath)
-                Text("当前版本无法安全预览此类型，请选择解压查看原文件。")
-                Button(onClick = { onExtract(errorPath) }, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Outlined.ArrowDownward, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("解压此文件")
+                    Text("解压到…")
                 }
             }
             OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("返回文件列表") }
@@ -641,50 +833,86 @@ private fun PreviewStatusCard(
 }
 
 @Composable
-private fun PreviewMediaContent(item: ArchivePreview) {
+private fun PreviewMediaContent(item: ArchivePreview, onPlaybackError: () -> Unit) {
     val context = LocalContext.current
     var mediaFile by remember(item.path) { mutableStateOf<File?>(null) }
     var materializeError by remember(item.path) { mutableStateOf<String?>(null) }
 
     DisposableEffect(item.path, item.mimeType, item.bytes) {
+        var temporaryFile: File? = null
         val fileResult = runCatching {
-            val file = File.createTempFile("betterpak-preview-", ".media", context.cacheDir)
-            file.outputStream().use { output -> output.write(item.bytes ?: error("预览内容为空")) }
-            file
+            temporaryFile = File.createTempFile("betterpak-preview-", ".media", context.cacheDir)
+            temporaryFile!!.outputStream().use { output -> output.write(item.bytes ?: error("预览内容为空")) }
+            temporaryFile!!
+        }.onFailure {
+            temporaryFile?.delete()
         }
         mediaFile = fileResult.getOrNull()
         materializeError = fileResult.exceptionOrNull()?.message
-        onDispose { fileResult.getOrNull()?.delete() }
+        onDispose {
+            fileResult.getOrNull()?.delete()
+            ArchiveRepository.cleanupTemporaryFiles(context)
+        }
+    }
+
+    LaunchedEffect(materializeError) {
+        if (materializeError != null) onPlaybackError()
     }
 
     when {
         materializeError != null -> Text("媒体文件准备失败：$materializeError\n请解压后使用其他播放器打开。")
         mediaFile == null -> Text("正在准备媒体预览…")
-        item.mimeType.startsWith("audio/") -> PreviewAudio(mediaFile!!)
-        else -> PreviewVideo(mediaFile!!)
+        item.mimeType.startsWith("audio/") -> PreviewAudio(mediaFile!!, onPlaybackError)
+        else -> PreviewVideo(mediaFile!!, onPlaybackError)
     }
 }
 
 @Composable
-private fun PreviewAudio(file: File) {
+private fun PreviewAudio(file: File, onPlaybackError: () -> Unit) {
     var prepared by remember(file) { mutableStateOf(false) }
     var playing by remember(file) { mutableStateOf(false) }
     var playbackError by remember(file) { mutableStateOf<String?>(null) }
+    var duration by remember(file) { mutableIntStateOf(0) }
+    var position by remember(file) { mutableIntStateOf(0) }
+    var speed by remember(file) { mutableStateOf(1.0f) }
+    var speedMenuExpanded by remember(file) { mutableStateOf(false) }
     val player = remember(file) { MediaPlayer() }
+    val currentOnPlaybackError by rememberUpdatedState(onPlaybackError)
 
     DisposableEffect(file) {
-        player.setOnPreparedListener { prepared = true }
-        player.setOnCompletionListener { playing = false }
+        player.setOnPreparedListener {
+            prepared = true
+            duration = player.duration.coerceAtLeast(0)
+        }
+        player.setOnCompletionListener {
+            playing = false
+            position = 0
+        }
         player.setOnErrorListener { _, what, extra ->
             playbackError = "播放器不支持此音频（$what/$extra）"
             playing = false
+            currentOnPlaybackError()
             true
         }
         runCatching {
             player.setDataSource(file.absolutePath)
             player.prepareAsync()
-        }.onFailure { error -> playbackError = error.message ?: "播放器初始化失败" }
-        onDispose { player.release() }
+        }.onFailure { error ->
+            playbackError = error.message ?: "播放器初始化失败"
+            currentOnPlaybackError()
+        }
+        onDispose {
+            runCatching { player.stop() }
+            player.release()
+        }
+    }
+
+    LaunchedEffect(prepared, playing) {
+        while (prepared) {
+            position = runCatching { player.currentPosition }.getOrDefault(position)
+            if (!playing) break
+            delay(250)
+        }
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -692,46 +920,177 @@ private fun PreviewAudio(file: File) {
             Text("$playbackError\n请解压后使用其他播放器打开。")
         } else {
             Text("音频预览")
-            Button(
-                onClick = {
-                    if (playing) {
-                        player.pause()
-                        playing = false
-                    } else {
-                        player.start()
-                        playing = true
-                    }
+            Slider(
+                value = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f,
+                onValueChange = { value ->
+                    position = (value * duration).roundToInt()
+                    if (prepared) runCatching { player.seekTo(position) }
                 },
-                enabled = prepared,
-            ) { Text(if (playing) "暂停" else if (prepared) "播放" else "准备中…") }
+                enabled = prepared && duration > 0,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = {
+                        runCatching {
+                            if (playing) player.pause() else player.start()
+                            playing = !playing
+                        }.onFailure { error ->
+                            playbackError = error.message ?: "音频播放失败"
+                            currentOnPlaybackError()
+                        }
+                    },
+                    enabled = prepared,
+                ) {
+                    Icon(if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (playing) "暂停" else if (prepared) "播放" else "准备中…")
+                }
+                Spacer(Modifier.width(10.dp))
+                Box {
+                    TextButton(onClick = { speedMenuExpanded = true }, enabled = prepared) {
+                        Icon(Icons.Outlined.Speed, contentDescription = null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("${speed}x")
+                    }
+                    DropdownMenu(
+                        expanded = speedMenuExpanded,
+                        onDismissRequest = { speedMenuExpanded = false },
+                    ) {
+                        listOf(0.5f, 1.0f, 1.5f, 2.0f).forEach { value ->
+                            DropdownMenuItem(
+                                text = { Text("${value}x") },
+                                onClick = {
+                                    runCatching { player.playbackParams = player.playbackParams.setSpeed(value) }
+                                    speed = value
+                                    speedMenuExpanded = false
+                                },
+                            )
+                        }
+                    }
+                }
+                Text(
+                    "${formatPlaybackTime(position)} / ${formatPlaybackTime(duration)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun PreviewVideo(file: File) {
+private fun PreviewVideo(file: File, onPlaybackError: () -> Unit) {
+    var videoPlayerView by remember(file) { mutableStateOf<VideoView?>(null) }
+    var preparedMediaPlayer by remember(file) { mutableStateOf<MediaPlayer?>(null) }
+    var prepared by remember(file) { mutableStateOf(false) }
+    var playing by remember(file) { mutableStateOf(false) }
+    var duration by remember(file) { mutableIntStateOf(0) }
+    var position by remember(file) { mutableIntStateOf(0) }
+    var speed by remember(file) { mutableStateOf(1.0f) }
+    var speedMenuExpanded by remember(file) { mutableStateOf(false) }
     var playbackError by remember(file) { mutableStateOf<String?>(null) }
+    val currentOnPlaybackError by rememberUpdatedState(onPlaybackError)
+
+    DisposableEffect(file) {
+        onDispose { runCatching { videoPlayerView?.stopPlayback() } }
+    }
+
+    LaunchedEffect(prepared, playing) {
+        while (prepared) {
+            position = runCatching { videoPlayerView?.currentPosition ?: position }.getOrDefault(position)
+            if (!playing) break
+            delay(250)
+        }
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         AndroidView(
             modifier = Modifier.fillMaxWidth().height(300.dp),
             factory = { videoContext ->
                 val videoView = VideoView(videoContext)
-                val controller = MediaController(videoContext)
-                controller.setAnchorView(videoView)
-                videoView.setMediaController(controller)
-                videoView.setVideoPath(file.absolutePath)
                 videoView.setOnPreparedListener { mediaPlayer ->
-                    mediaPlayer.isLooping = true
-                    videoView.start()
+                    preparedMediaPlayer = mediaPlayer
+                    prepared = true
+                    duration = videoView.duration.coerceAtLeast(0)
                 }
                 videoView.setOnErrorListener { _, what, extra ->
                     playbackError = "播放器不支持此视频（$what/$extra）"
+                    currentOnPlaybackError()
                     true
                 }
+                videoView.setOnCompletionListener {
+                    playing = false
+                    position = 0
+                }
+                videoPlayerView = videoView
+                videoView.setVideoPath(file.absolutePath)
                 videoView
             },
+            update = { videoPlayerView = it },
         )
-        if (playbackError != null) Text("$playbackError\n请解压后使用其他播放器打开。")
+        if (playbackError != null) {
+            Text("$playbackError\n请解压后使用其他播放器打开。")
+        } else {
+            Slider(
+                value = if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f,
+                onValueChange = { value ->
+                    position = (value * duration).roundToInt()
+                    videoPlayerView?.seekTo(position)
+                },
+                enabled = prepared && duration > 0,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = {
+                        runCatching {
+                            val view = videoPlayerView ?: error("视频播放器未准备好")
+                            if (playing) view.pause() else view.start()
+                            playing = !playing
+                        }.onFailure { error ->
+                            playbackError = error.message ?: "视频播放失败"
+                            currentOnPlaybackError()
+                        }
+                    },
+                    enabled = prepared,
+                ) {
+                    Icon(if (playing) Icons.Outlined.Pause else Icons.Outlined.PlayArrow, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (playing) "暂停" else if (prepared) "播放" else "准备中…")
+                }
+                Spacer(Modifier.width(10.dp))
+                Box {
+                    TextButton(onClick = { speedMenuExpanded = true }, enabled = prepared) {
+                        Icon(Icons.Outlined.Speed, contentDescription = null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("${speed}x")
+                    }
+                    DropdownMenu(
+                        expanded = speedMenuExpanded,
+                        onDismissRequest = { speedMenuExpanded = false },
+                    ) {
+                        listOf(0.5f, 1.0f, 1.5f, 2.0f).forEach { value ->
+                            DropdownMenuItem(
+                                text = { Text("${value}x") },
+                                onClick = {
+                                    runCatching {
+                                        preparedMediaPlayer?.let { player ->
+                                            player.playbackParams = player.playbackParams.setSpeed(value)
+                                        }
+                                    }
+                                    speed = value
+                                    speedMenuExpanded = false
+                                },
+                            )
+                        }
+                    }
+                }
+                Text(
+                    "${formatPlaybackTime(position)} / ${formatPlaybackTime(duration)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
@@ -772,6 +1131,7 @@ private fun startPreviewExtraction(
             setStatus("已取消解压")
         } finally {
             setBusy(false)
+            ArchiveRepository.cleanupTemporaryFiles(context)
         }
     }
 }
@@ -782,4 +1142,26 @@ private fun previewFormatSize(size: Long): String {
     if (size < 1024 * 1024) return "%.1f KB".format(size / 1024.0)
     if (size < 1024L * 1024L * 1024L) return "%.1f MB".format(size / (1024.0 * 1024.0))
     return "%.1f GB".format(size / (1024.0 * 1024.0 * 1024.0))
+}
+
+private fun decodePreviewBitmap(bytes: ByteArray): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    val width = bounds.outWidth
+    val height = bounds.outHeight
+    if (
+        width <= 0 ||
+        height <= 0 ||
+        width > MAX_PREVIEW_IMAGE_DIMENSION ||
+        height > MAX_PREVIEW_IMAGE_DIMENSION ||
+        width.toLong() * height.toLong() > MAX_PREVIEW_IMAGE_PIXELS
+    ) {
+        return null
+    }
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+}
+
+private fun formatPlaybackTime(milliseconds: Int): String {
+    val totalSeconds = (milliseconds / 1000).coerceAtLeast(0)
+    return "%d:%02d".format(totalSeconds / 60, totalSeconds % 60)
 }
