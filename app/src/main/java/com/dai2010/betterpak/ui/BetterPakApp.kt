@@ -73,17 +73,22 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.dai2010.betterpak.data.AppSettings
-import com.dai2010.betterpak.data.ArchiveRepository
+import com.dai2010.betterpak.data.ArchiveDefaults
+import com.dai2010.betterpak.data.ArchiveEngineProvider
+import com.dai2010.betterpak.data.ArchiveTaskStore
 import com.dai2010.betterpak.data.SettingsRepository
 import com.dai2010.betterpak.data.ThemeMode
 import com.dai2010.betterpak.domain.ArchiveCreateOptions
+import com.dai2010.betterpak.domain.ArchiveErrorClassifier
 import com.dai2010.betterpak.domain.ArchiveExtractOptions
 import com.dai2010.betterpak.domain.ArchiveFormat
 import com.dai2010.betterpak.domain.ArchiveProgress
+import com.dai2010.betterpak.domain.ArchiveTaskKind
 import com.dai2010.betterpak.domain.CompressionAlgorithm
 import com.dai2010.betterpak.domain.OverwritePolicy
 import com.dai2010.betterpak.ui.theme.BetterPakTheme
@@ -106,6 +111,11 @@ fun BetterPakApp(initialArchiveUri: Uri? = null) {
     val context = LocalContext.current
     val settingsRepository = remember { SettingsRepository(context.applicationContext) }
     val settings by settingsRepository.settings.collectAsState(initial = AppSettings())
+    val taskStore = remember { ArchiveTaskStore(context.applicationContext) }
+    val taskViewModel: ArchiveTaskViewModel = viewModel(
+        factory = ArchiveTaskViewModelFactory(taskStore),
+    )
+    val tasks by taskViewModel.tasks.collectAsState()
     val navController = rememberNavController()
     var previewRequest by remember { mutableStateOf<PreviewRequest?>(null) }
 
@@ -116,17 +126,31 @@ fun BetterPakApp(initialArchiveUri: Uri? = null) {
         ) {
             composable(Routes.HOME) {
                 HomeScreen(
+                    taskCount = tasks.size,
                     onCreate = { navController.navigate(Routes.CREATE) },
                     onExtract = { navController.navigate(Routes.EXTRACT) },
                     onPreview = { navController.navigate(Routes.PREVIEW) },
                     onSettings = { navController.navigate(Routes.SETTINGS) },
                 )
             }
-            composable(Routes.CREATE) { CreateScreen(onBack = { navController.popBackStack() }) }
-            composable(Routes.EXTRACT) { ExtractScreen(onBack = { navController.popBackStack() }) }
+            composable(Routes.CREATE) {
+                CreateScreen(
+                    archiveDefaults = settings.archiveDefaults,
+                    taskViewModel = taskViewModel,
+                    onBack = { navController.popBackStack() },
+                )
+            }
+            composable(Routes.EXTRACT) {
+                ExtractScreen(
+                    archiveDefaults = settings.archiveDefaults,
+                    taskViewModel = taskViewModel,
+                    onBack = { navController.popBackStack() },
+                )
+            }
             composable(Routes.PREVIEW) {
                 PreviewSetupScreen(
                     initialArchiveUri = initialArchiveUri,
+                    archiveDefaults = settings.archiveDefaults,
                     onBack = { navController.popBackStack() },
                     onOpenPreview = { request ->
                         previewRequest = request
@@ -138,6 +162,7 @@ fun BetterPakApp(initialArchiveUri: Uri? = null) {
                 previewRequest?.let { request ->
                     PreviewBrowserScreen(
                         request = request,
+                        taskViewModel = taskViewModel,
                         onBack = { navController.popBackStack() },
                     )
                 }
@@ -156,6 +181,7 @@ fun BetterPakApp(initialArchiveUri: Uri? = null) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HomeScreen(
+    taskCount: Int,
     onCreate: () -> Unit,
     onExtract: () -> Unit,
     onPreview: () -> Unit,
@@ -182,6 +208,11 @@ private fun HomeScreen(
                 Text("压缩包管理", style = MaterialTheme.typography.headlineMedium)
                 Text(
                     "创建、解压、预览。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "任务记录：$taskCount（密码不会保存）",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -238,7 +269,11 @@ private fun HomeActionCard(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CreateScreen(onBack: () -> Unit) {
+private fun CreateScreen(
+    archiveDefaults: com.dai2010.betterpak.data.ArchiveDefaults,
+    taskViewModel: ArchiveTaskViewModel,
+    onBack: () -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var selectedUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
@@ -257,13 +292,13 @@ private fun CreateScreen(onBack: () -> Unit) {
     var pendingFormat by remember { mutableStateOf(ArchiveFormat.ZIP.name) }
 
     val pickInputs = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        uris.forEach { ArchiveRepository.persistUriPermission(context, it) }
+        uris.forEach { ArchiveEngineProvider.engine.persistUriPermission(context, it) }
         selectedUris = uris
         status = if (uris.isEmpty()) null else "已选择 ${uris.size} 个文件"
     }
     val pickInputDirectory = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null && uri !in selectedUris) {
-            ArchiveRepository.persistUriPermission(context, uri)
+            ArchiveEngineProvider.engine.persistUriPermission(context, uri)
             selectedUris = selectedUris + uri
             status = "已选择 ${selectedUris.size} 个文件或目录"
         }
@@ -273,45 +308,71 @@ private fun CreateScreen(onBack: () -> Unit) {
             busy = true
             progress = null
             val format = ArchiveFormat.valueOf(pendingFormat)
+            val task = taskViewModel.enqueue(
+                kind = ArchiveTaskKind.CREATE,
+                sourceUri = selectedUris.joinToString(",") { it.toString() },
+                targetUri = outputUri.toString(),
+                format = format,
+            )
+            taskViewModel.start(task.id)
             status = "正在创建 ${format.label} 压缩包…"
             operationJob = scope.launch {
                 try {
                     val result = when (format) {
-                        ArchiveFormat.ZIP -> ArchiveRepository.createZip(
+                        ArchiveFormat.ZIP -> ArchiveEngineProvider.engine.createZip(
                             context,
                             selectedUris,
                             outputUri,
                             pendingOptions,
-                            onProgress = { progress = it },
+                            onProgress = {
+                                progress = it
+                                taskViewModel.updateProgress(task.id, "${it.processedEntries}/${it.totalEntries} entries, ${it.processedBytes} bytes")
+                            },
                         )
-                        ArchiveFormat.SEVEN_Z -> ArchiveRepository.createSevenZ(
+                        ArchiveFormat.SEVEN_Z -> ArchiveEngineProvider.engine.createSevenZ(
                             context,
                             selectedUris,
                             outputUri,
                             pendingOptions,
-                            onProgress = { progress = it },
+                            onProgress = {
+                                progress = it
+                                taskViewModel.updateProgress(task.id, "${it.processedEntries}/${it.totalEntries} entries, ${it.processedBytes} bytes")
+                            },
                         )
-                        ArchiveFormat.TAR -> ArchiveRepository.createTar(
+                        ArchiveFormat.TAR -> ArchiveEngineProvider.engine.createTar(
                             context,
                             selectedUris,
                             outputUri,
                             pendingOptions,
-                            onProgress = { progress = it },
+                            onProgress = {
+                                progress = it
+                                taskViewModel.updateProgress(task.id, "${it.processedEntries}/${it.totalEntries} entries, ${it.processedBytes} bytes")
+                            },
                         )
-                        ArchiveFormat.TAR_ZSTANDARD -> ArchiveRepository.createTarZstandard(
+                        ArchiveFormat.TAR_ZSTANDARD -> ArchiveEngineProvider.engine.createTarZstandard(
                             context,
                             selectedUris,
                             outputUri,
                             pendingOptions,
-                            onProgress = { progress = it },
+                            onProgress = {
+                                progress = it
+                                taskViewModel.updateProgress(task.id, "${it.processedEntries}/${it.totalEntries} entries, ${it.processedBytes} bytes")
+                            },
                         )
                         else -> Result.failure(IllegalArgumentException("暂不支持创建该格式"))
                     }
                     status = result.fold(
-                        onSuccess = { "创建完成，共打包 $it 个文件" },
-                        onFailure = { "创建失败：${it.message ?: "未知错误"}" },
+                        onSuccess = {
+                            taskViewModel.complete(task.id)
+                            "创建完成，共打包 $it 个文件"
+                        },
+                        onFailure = {
+                            taskViewModel.fail(task.id, ArchiveErrorClassifier.classify(it))
+                            "创建失败：${it.message ?: "未知错误"}"
+                        },
                     )
                 } catch (_: CancellationException) {
+                    taskViewModel.cancel(task.id)
                     status = "已取消创建"
                 } finally {
                     busy = false
@@ -532,7 +593,11 @@ private fun CreateScreen(onBack: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ExtractScreen(onBack: () -> Unit) {
+private fun ExtractScreen(
+    archiveDefaults: com.dai2010.betterpak.data.ArchiveDefaults,
+    taskViewModel: ArchiveTaskViewModel,
+    onBack: () -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var archiveUri by remember { mutableStateOf<Uri?>(null) }
@@ -540,9 +605,15 @@ private fun ExtractScreen(onBack: () -> Unit) {
     var destinationUri by remember { mutableStateOf<Uri?>(null) }
     var password by remember { mutableStateOf("") }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
-    var overwritePolicy by rememberSaveable { mutableStateOf(OverwritePolicy.REPLACE.name) }
-    var maxEntriesText by rememberSaveable { mutableStateOf("100000") }
-    var maxSizeGbText by rememberSaveable { mutableStateOf("50") }
+    var overwritePolicy by rememberSaveable(archiveDefaults.overwritePolicy) {
+        mutableStateOf(archiveDefaults.overwritePolicy.name)
+    }
+    var maxEntriesText by rememberSaveable(archiveDefaults.maxEntries) {
+        mutableStateOf(archiveDefaults.maxEntries.toString())
+    }
+    var maxSizeGbText by rememberSaveable(archiveDefaults.maxExpandedBytes) {
+        mutableStateOf((archiveDefaults.maxExpandedBytes / 1024.0 / 1024.0 / 1024.0).toString())
+    }
     var threads by rememberSaveable { mutableIntStateOf(2) }
     var advancedExpanded by rememberSaveable { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
@@ -552,9 +623,9 @@ private fun ExtractScreen(onBack: () -> Unit) {
     var overwriteMenuExpanded by remember { mutableStateOf(false) }
 
     val pickArchive = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { ArchiveRepository.persistUriPermission(context, it) }
+        uri?.let { ArchiveEngineProvider.engine.persistUriPermission(context, it) }
         archiveUri = uri
-        archiveFormat = uri?.let { ArchiveRepository.detectFormat(context, it) } ?: ArchiveFormat.UNKNOWN
+        archiveFormat = uri?.let { ArchiveEngineProvider.engine.detectFormat(context, it) } ?: ArchiveFormat.UNKNOWN
         if (!archiveFormat.supportsPassword) password = ""
         status = when {
             uri == null -> null
@@ -563,7 +634,7 @@ private fun ExtractScreen(onBack: () -> Unit) {
         }
     }
     val pickDestination = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { ArchiveRepository.persistUriPermission(context, it) }
+        uri?.let { ArchiveEngineProvider.engine.persistUriPermission(context, it) }
         destinationUri = uri
     }
 
@@ -572,7 +643,7 @@ private fun ExtractScreen(onBack: () -> Unit) {
             modifier = Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            OutlinedButton(onClick = { pickArchive.launch(ArchiveRepository.supportedArchiveMimeTypes()) }, modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = { pickArchive.launch(ArchiveEngineProvider.engine.supportedArchiveMimeTypes()) }, modifier = Modifier.fillMaxWidth()) {
                 Icon(Icons.Outlined.Archive, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text(if (archiveUri == null) "选择 ZIP、RAR、7z、TAR 或 Zstandard 文件" else "重新选择压缩包")
@@ -699,24 +770,41 @@ private fun ExtractScreen(onBack: () -> Unit) {
                             maxExpandedBytes = (maxGb * 1024 * 1024 * 1024).toLong(),
                             threads = threads,
                         )
+                        val task = taskViewModel.enqueue(
+                            kind = ArchiveTaskKind.EXTRACT,
+                            sourceUri = archive.toString(),
+                            targetUri = destination.toString(),
+                            format = archiveFormat,
+                        )
+                        taskViewModel.start(task.id)
                         busy = true
                         progress = null
                         status = "正在解压全部文件…"
                         operationJob = scope.launch {
                             try {
-                                val result = ArchiveRepository.extract(
+                                val result = ArchiveEngineProvider.engine.extract(
                                     context,
                                     archive,
                                     destination,
                                     null,
                                     options,
-                                    onProgress = { progress = it },
+                                    onProgress = {
+                                        progress = it
+                                        taskViewModel.updateProgress(task.id, "${it.processedEntries}/${it.totalEntries} entries, ${it.processedBytes} bytes")
+                                    },
                                 )
                                 status = result.fold(
-                                    onSuccess = { "解压完成，共处理 $it 个文件" },
-                                    onFailure = { "解压失败：${it.message ?: "未知错误"}" },
+                                    onSuccess = {
+                                        taskViewModel.complete(task.id)
+                                        "解压完成，共处理 $it 个文件"
+                                    },
+                                    onFailure = {
+                                        taskViewModel.fail(task.id, ArchiveErrorClassifier.classify(it))
+                                        "解压失败：${it.message ?: "未知错误"}"
+                                    },
                                 )
                             } catch (_: CancellationException) {
+                                taskViewModel.cancel(task.id)
                                 status = "已取消解压"
                             } finally {
                                 busy = false
@@ -745,7 +833,20 @@ private fun SettingsScreen(
 ) {
     val scope = rememberCoroutineScope()
     var customSeed by remember(settings.customSeedHex) { mutableStateOf(settings.customSeedHex) }
+    var maxEntriesText by remember(settings.archiveDefaults.maxEntries) {
+        mutableStateOf(settings.archiveDefaults.maxEntries.toString())
+    }
+    var maxExpandedGbText by remember(settings.archiveDefaults.maxExpandedBytes) {
+        mutableStateOf((settings.archiveDefaults.maxExpandedBytes / 1024.0 / 1024.0 / 1024.0).toString())
+    }
+    var maxPreviewMbText by remember(settings.archiveDefaults.maxPreviewBytes) {
+        mutableStateOf((settings.archiveDefaults.maxPreviewBytes / 1024.0 / 1024.0).toString())
+    }
+    var overwritePolicy by remember(settings.archiveDefaults.overwritePolicy) {
+        mutableStateOf(settings.archiveDefaults.overwritePolicy)
+    }
     var status by remember { mutableStateOf<String?>(null) }
+    var overwriteMenuExpanded by remember { mutableStateOf(false) }
 
     Scaffold(topBar = { BackTopBar("设置", onBack) }) { padding ->
         Column(
@@ -781,6 +882,86 @@ private fun SettingsScreen(
                     }
                 }
             }
+            HorizontalDivider()
+            Text("解压与预览", style = MaterialTheme.typography.titleLarge)
+            OutlinedTextField(
+                value = maxEntriesText,
+                onValueChange = { maxEntriesText = it.filter(Char::isDigit) },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("最大条目数") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = maxExpandedGbText,
+                onValueChange = { maxExpandedGbText = it.filter { character -> character.isDigit() || character == '.' } },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("最大展开体积（GB，最多 50）") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = maxPreviewMbText,
+                onValueChange = { maxPreviewMbText = it.filter { character -> character.isDigit() || character == '.' } },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("最大预览大小（MB，最多 8）") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("已有文件处理：", modifier = Modifier.weight(1f))
+                Box {
+                    OutlinedButton(onClick = { overwriteMenuExpanded = true }) {
+                        Text(overwritePolicy.label)
+                    }
+                    DropdownMenu(
+                        expanded = overwriteMenuExpanded,
+                        onDismissRequest = { overwriteMenuExpanded = false },
+                    ) {
+                        OverwritePolicy.entries.forEach { policy ->
+                            DropdownMenuItem(
+                                text = { Text(policy.label) },
+                                onClick = {
+                                    overwritePolicy = policy
+                                    overwriteMenuExpanded = false
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+            Button(
+                onClick = {
+                    val maxEntries = maxEntriesText.toIntOrNull()
+                    val maxExpandedGb = maxExpandedGbText.toDoubleOrNull()
+                    val maxPreviewMb = maxPreviewMbText.toDoubleOrNull()
+                    if (
+                        maxEntries == null || maxEntries !in 1..100_000 ||
+                        maxExpandedGb == null || maxExpandedGb !in 0.1..50.0 ||
+                        maxPreviewMb == null || maxPreviewMb !in 0.1..8.0
+                    ) {
+                        status = "请输入有效限制：条目数 1-100000、展开体积 0.1-50 GB、预览大小 0.1-8 MB"
+                    } else {
+                        scope.launch {
+                            repository.setArchiveDefaults(
+                                ArchiveDefaults(
+                                    maxEntries = maxEntries,
+                                    maxExpandedBytes = (maxExpandedGb * 1024 * 1024 * 1024).toLong(),
+                                    maxPreviewBytes = (maxPreviewMb * 1024 * 1024).toLong(),
+                                    overwritePolicy = overwritePolicy,
+                                ),
+                            )
+                        }
+                        status = "解压与预览限制已保存"
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("保存解压与预览设置") }
+            Text(
+                "限制用于防止意外的大量展开和内存占用；密码只在当前操作内存中使用，不会保存。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             HorizontalDivider()
             Text("主题色", style = MaterialTheme.typography.titleLarge)
             OutlinedTextField(

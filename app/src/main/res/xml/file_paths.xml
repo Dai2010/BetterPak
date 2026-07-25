@@ -6,4 +6,7 @@
     <files-path
         name="betterpak_internal_files"
         path="BetterPak/" />
+    <cache-path
+        name="betterpak_open_cache"
+        path="betterpak-open/" />
 </paths>

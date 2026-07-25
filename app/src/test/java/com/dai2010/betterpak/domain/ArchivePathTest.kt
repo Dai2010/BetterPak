@@ -23,4 +23,16 @@ class ArchivePathTest {
         assertNull(ArchivePath.normalize(""))
         assertNull(ArchivePath.normalize("safe\u0000name.txt"))
     }
+
+    @Test
+    fun keepsArchiveDirectoriesRelative() {
+        assertEquals("folder", ArchivePath.normalize("folder/"))
+        assertEquals("folder/file.txt", ArchivePath.normalize("./folder//file.txt"))
+    }
+
+    @Test
+    fun rejectsOtherAbsolutePathForms() {
+        assertNull(ArchivePath.normalize("\\server\\share\\file.txt"))
+        assertNull(ArchivePath.normalize("//server/share/file.txt"))
+    }
 }

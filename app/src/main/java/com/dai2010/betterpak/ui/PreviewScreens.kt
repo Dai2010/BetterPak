@@ -87,8 +87,10 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
-import com.dai2010.betterpak.data.ArchiveRepository
+import com.dai2010.betterpak.data.ArchiveDefaults
+import com.dai2010.betterpak.data.ArchiveEngineProvider
 import com.dai2010.betterpak.domain.ArchiveExtractOptions
+import com.dai2010.betterpak.domain.ArchiveErrorClassifier
 import com.dai2010.betterpak.domain.ArchiveFormat
 import com.dai2010.betterpak.domain.ArchiveItem
 import com.dai2010.betterpak.domain.ArchivePreview
@@ -109,6 +111,7 @@ data class PreviewRequest(
     val format: ArchiveFormat,
     val password: String,
     val extractOptions: ArchiveExtractOptions,
+    val maxPreviewBytes: Long,
     val destinationUri: Uri?,
 )
 
@@ -116,31 +119,38 @@ data class PreviewRequest(
 @Composable
 fun PreviewSetupScreen(
     initialArchiveUri: Uri? = null,
+    archiveDefaults: ArchiveDefaults = ArchiveDefaults(),
     onOpenPreview: (PreviewRequest) -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
     var archiveUri by remember(initialArchiveUri) { mutableStateOf(initialArchiveUri) }
     var archiveFormat by remember(initialArchiveUri) {
-        mutableStateOf(initialArchiveUri?.let { ArchiveRepository.detectFormat(context, it) } ?: ArchiveFormat.UNKNOWN)
+        mutableStateOf(initialArchiveUri?.let { ArchiveEngineProvider.engine.detectFormat(context, it) } ?: ArchiveFormat.UNKNOWN)
     }
     var destinationUri by remember { mutableStateOf<Uri?>(null) }
     var password by remember { mutableStateOf("") }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
-    var overwritePolicy by rememberSaveable { mutableStateOf(OverwritePolicy.REPLACE.name) }
-    var maxEntriesText by rememberSaveable { mutableStateOf("100000") }
-    var maxSizeGbText by rememberSaveable { mutableStateOf("50") }
+    var overwritePolicy by rememberSaveable(archiveDefaults.overwritePolicy) {
+        mutableStateOf(archiveDefaults.overwritePolicy.name)
+    }
+    var maxEntriesText by rememberSaveable(archiveDefaults.maxEntries) {
+        mutableStateOf(archiveDefaults.maxEntries.toString())
+    }
+    var maxSizeGbText by rememberSaveable(archiveDefaults.maxExpandedBytes) {
+        mutableStateOf((archiveDefaults.maxExpandedBytes / 1024.0 / 1024.0 / 1024.0).toString())
+    }
     var extractionThreads by rememberSaveable { mutableIntStateOf(2) }
     var advancedExpanded by rememberSaveable { mutableStateOf(true) }
     var status by remember { mutableStateOf<String?>(null) }
     var overwriteMenuExpanded by remember { mutableStateOf(false) }
 
     LaunchedEffect(initialArchiveUri) {
-        initialArchiveUri?.let { ArchiveRepository.persistUriPermission(context, it) }
+        initialArchiveUri?.let { ArchiveEngineProvider.engine.persistUriPermission(context, it) }
     }
 
     fun selectArchive(uri: Uri?) {
-        val format = uri?.let { ArchiveRepository.detectFormat(context, it) } ?: ArchiveFormat.UNKNOWN
+        val format = uri?.let { ArchiveEngineProvider.engine.detectFormat(context, it) } ?: ArchiveFormat.UNKNOWN
         archiveUri = uri
         archiveFormat = format
         if (!format.supportsPassword) password = ""
@@ -152,11 +162,11 @@ fun PreviewSetupScreen(
     }
 
     val pickArchive = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let { ArchiveRepository.persistUriPermission(context, it) }
+        uri?.let { ArchiveEngineProvider.engine.persistUriPermission(context, it) }
         selectArchive(uri)
     }
     val pickDestination = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { ArchiveRepository.persistUriPermission(context, it) }
+        uri?.let { ArchiveEngineProvider.engine.persistUriPermission(context, it) }
         destinationUri = uri
     }
 
@@ -175,7 +185,7 @@ fun PreviewSetupScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             OutlinedButton(
-                onClick = { pickArchive.launch(ArchiveRepository.supportedArchiveMimeTypes()) },
+                onClick = { pickArchive.launch(ArchiveEngineProvider.engine.supportedArchiveMimeTypes()) },
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Icon(Icons.Outlined.Archive, contentDescription = null)
@@ -306,6 +316,7 @@ fun PreviewSetupScreen(
                                     ).toLong(),
                                     threads = extractionThreads,
                                 ),
+                                maxPreviewBytes = archiveDefaults.maxPreviewBytes,
                                 destinationUri = destinationUri,
                             ),
                         )
@@ -323,7 +334,11 @@ fun PreviewSetupScreen(
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
+fun PreviewBrowserScreen(
+    request: PreviewRequest,
+    taskViewModel: ArchiveTaskViewModel,
+    onBack: () -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var items by remember(request) { mutableStateOf<List<ArchiveItem>>(emptyList()) }
@@ -344,7 +359,7 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
     var operationJob by remember { mutableStateOf<Job?>(null) }
 
     val pickDestination = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let { ArchiveRepository.persistUriPermission(context, it) }
+        uri?.let { ArchiveEngineProvider.engine.persistUriPermission(context, it) }
         destinationUri = uri
         val path = pendingExtractPath
         if (uri != null && path != null) {
@@ -355,6 +370,7 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
                 context = context,
                 scope = scope,
                 request = request,
+                taskViewModel = taskViewModel,
                 destinationUri = uri,
                 selectedPaths = setOf(path),
                 allFiles = false,
@@ -368,17 +384,17 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
     fun openExtractedFile(file: File) {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         val intent = Intent(Intent.ACTION_VIEW)
-            .setDataAndType(uri, ArchiveRepository.mimeTypeForPath(file.name))
+            .setDataAndType(uri, ArchiveEngineProvider.engine.mimeTypeForPath(file.name))
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
-            context.startActivity(intent)
-            status = "已使用系统应用打开 ${file.name}"
+            context.startActivity(Intent.createChooser(intent, "选择应用打开"))
+            status = "已请求系统应用打开 ${file.name}"
         } catch (_: ActivityNotFoundException) {
-            status = "文件已解压到应用内部存储，但没有可打开此类型的应用"
+            status = "文件已准备到应用缓存，但没有可打开此类型的应用"
         }
     }
 
-    fun extractAndOpen(path: String) {
+    fun openExternalFile(path: String) {
         fallbackPath = path
         fallbackError = null
         previewErrorPath = null
@@ -386,7 +402,7 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
         fallbackJob?.cancel()
         fallbackJob = scope.launch {
             try {
-                val result = ArchiveRepository.extractEntryToInternalStorage(
+                val result = ArchiveEngineProvider.engine.extractEntryToCache(
                     context = context,
                     archiveUri = request.archiveUri,
                     path = path,
@@ -400,22 +416,22 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
                         previewLoading = false
                     },
                     onFailure = { error ->
-                        fallbackError = error.message ?: "无法解压此文件"
+                        fallbackError = error.message ?: "无法准备外部打开文件"
                         previewErrorPath = path
                         fallbackPath = null
                         previewLoading = false
                     },
                 )
             } finally {
-                ArchiveRepository.cleanupTemporaryFiles(context)
+                ArchiveEngineProvider.engine.cleanupTemporaryFiles(context)
                 fallbackJob = null
             }
         }
     }
 
     LaunchedEffect(request) {
-        ArchiveRepository.initializeAppStorage(context)
-        val result = ArchiveRepository.list(context, request.archiveUri, request.password)
+        ArchiveEngineProvider.engine.initializeAppStorage(context)
+        val result = ArchiveEngineProvider.engine.list(context, request.archiveUri, request.password)
         loading = false
         result.fold(
             onSuccess = { loaded ->
@@ -437,7 +453,13 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
         fallbackPath = item.path
         status = "正在预览 ${item.path}…"
         scope.launch {
-            val result = ArchiveRepository.preview(context, request.archiveUri, item.path, request.password)
+            val result = ArchiveEngineProvider.engine.preview(
+                context = context,
+                uri = request.archiveUri,
+                path = item.path,
+                password = request.password,
+                maxBytes = request.maxPreviewBytes,
+            )
             result.fold(
                 onSuccess = {
                     previewItem = it
@@ -447,10 +469,13 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
                     previewLoading = false
                     status = null
                 },
-                onFailure = {
+                onFailure = { error ->
                     previewItem = null
+                    previewErrorPath = item.path
+                    fallbackPath = null
+                    fallbackError = error.message
+                    previewLoading = false
                     status = null
-                    extractAndOpen(item.path)
                 },
             )
         }
@@ -472,6 +497,7 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
             context = context,
             scope = scope,
             request = request,
+            taskViewModel = taskViewModel,
             destinationUri = destinationUri,
             selectedPaths = setOf(path),
             allFiles = false,
@@ -497,7 +523,7 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
                 previewLoading = false
             },
             onExtract = { path -> extractPath(path) },
-            onFallback = { path -> extractAndOpen(path) },
+            onFallback = { path -> openExternalFile(path) },
         )
         return
     }
@@ -635,6 +661,7 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
                                     context,
                                     scope,
                                     request,
+                                    taskViewModel,
                                     destinationUri,
                                     selectedPaths,
                                     allFiles = false,
@@ -652,6 +679,7 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
                                     context,
                                     scope,
                                     request,
+                                    taskViewModel,
                                     destinationUri,
                                     emptySet(),
                                     allFiles = true,
@@ -672,7 +700,7 @@ fun PreviewBrowserScreen(request: PreviewRequest, onBack: () -> Unit) {
 
 @Composable
 private fun PreviewFileIcon(path: String, isDirectory: Boolean) {
-    val mimeType = ArchiveRepository.mimeTypeForPath(path)
+    val mimeType = ArchiveEngineProvider.engine.mimeTypeForPath(path)
     val icon = when {
         isDirectory -> Icons.Outlined.Folder
         mimeType.startsWith("image/") -> Icons.Outlined.Image
@@ -704,11 +732,7 @@ private fun PreviewDetailScreen(
     var fallbackRequested by remember(displayPath) { mutableStateOf(false) }
 
     fun requestFallback() {
-        val path = displayPath ?: return
-        if (!fallbackRequested) {
-            fallbackRequested = true
-            onFallback(path)
-        }
+        if (!fallbackRequested) fallbackRequested = true
     }
 
     Scaffold(topBar = { PreviewBackTopBar("文件预览", onBack) }) { padding ->
@@ -760,27 +784,38 @@ private fun PreviewDetailScreen(
                                 )
                             } else {
                                 LaunchedEffect(item.path) { requestFallback() }
-                                Text("图片无法在应用内解码，正在使用系统应用打开…")
+                                Text("图片无法在应用内解码，请选择外部应用打开或解压。")
                             }
                         }
                         else -> {
-                            LaunchedEffect(item.path) { requestFallback() }
-                            Text("该文件无法在应用内预览，正在准备系统应用打开…")
+                            Text("该文件无法在应用内预览，请选择解压或外部应用打开。")
                         }
+                    }
+                    if (fallbackRequested) {
+                        Text("应用内处理失败；BetterPak 不执行宏、脚本或嵌套归档。")
                     }
                 } else if (fallbackLoading) {
                     Text("无法在应用内预览", style = MaterialTheme.typography.headlineSmall)
-                    Text("正在解压并使用系统应用打开…")
+                    Text("正在准备文件并等待系统应用打开…")
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 } else if (errorPath != null) {
                     Text("无法预览此文件", style = MaterialTheme.typography.headlineSmall)
-                    Text("当前版本无法安全预览此类型，请选择解压查看原文件。")
+                    Text("BetterPak 不在应用内执行办公文档、宏、脚本或嵌套归档。请明确选择解压或交给系统应用。")
                     if (fallbackError != null) {
                         Text(fallbackError, color = MaterialTheme.colorScheme.error)
                     }
                 }
             }
             if (displayPath != null) {
+                if (fallbackRequested || errorPath != null) {
+                    OutlinedButton(
+                        onClick = { onFallback(displayPath) },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !fallbackLoading,
+                    ) {
+                        Text("解压到缓存并选择其他应用打开")
+                    }
+                }
                 Button(
                     onClick = { onExtract(displayPath) },
                     modifier = Modifier.fillMaxWidth(),
@@ -851,7 +886,7 @@ private fun PreviewMediaContent(item: ArchivePreview, onPlaybackError: () -> Uni
         materializeError = fileResult.exceptionOrNull()?.message
         onDispose {
             fileResult.getOrNull()?.delete()
-            ArchiveRepository.cleanupTemporaryFiles(context)
+            ArchiveEngineProvider.engine.cleanupTemporaryFiles(context)
         }
     }
 
@@ -1098,6 +1133,7 @@ private fun startPreviewExtraction(
     context: android.content.Context,
     scope: kotlinx.coroutines.CoroutineScope,
     request: PreviewRequest,
+    taskViewModel: ArchiveTaskViewModel,
     destinationUri: Uri?,
     selectedPaths: Set<String>,
     allFiles: Boolean,
@@ -1116,22 +1152,47 @@ private fun startPreviewExtraction(
     setBusy(true)
     setProgress(null)
     setStatus(if (allFiles) "正在解压当前页面全部文件…" else "正在解压选中文件…")
+    val task = taskViewModel.enqueue(
+        kind = com.dai2010.betterpak.domain.ArchiveTaskKind.EXTRACT,
+        sourceUri = request.archiveUri.toString(),
+        targetUri = destinationUri.toString(),
+        format = request.format,
+    )
+    taskViewModel.start(task.id)
     return scope.launch {
         try {
-            val result = ArchiveRepository.extract(
+            val result = ArchiveEngineProvider.engine.extract(
                 context = context,
                 archiveUri = request.archiveUri,
                 destinationUri = destinationUri,
                 selectedPaths = if (allFiles) null else selectedPaths,
                 options = request.extractOptions,
-                onProgress = { setProgress(it) },
+                onProgress = {
+                    setProgress(it)
+                    taskViewModel.updateProgress(
+                        task.id,
+                        "${it.processedEntries}/${it.totalEntries} entries, ${it.processedBytes} bytes",
+                    )
+                },
             )
-            setStatus(result.fold({ "解压完成，共处理 $it 个文件" }, { "解压失败：${it.message ?: "未知错误"}" }))
+            setStatus(
+                result.fold(
+                    {
+                        taskViewModel.complete(task.id)
+                        "解压完成，共处理 $it 个文件"
+                    },
+                    {
+                        taskViewModel.fail(task.id, ArchiveErrorClassifier.classify(it))
+                        "解压失败：${it.message ?: "未知错误"}"
+                    },
+                ),
+            )
         } catch (_: CancellationException) {
+            taskViewModel.cancel(task.id)
             setStatus("已取消解压")
         } finally {
             setBusy(false)
-            ArchiveRepository.cleanupTemporaryFiles(context)
+            ArchiveEngineProvider.engine.cleanupTemporaryFiles(context)
         }
     }
 }

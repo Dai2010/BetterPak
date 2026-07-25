@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag, for example v0.0.5
+        description: Release tag, for example v0.0.6
         required: true
-        default: v0.0.5
+        default: v0.0.6
   push:
     tags:
       - "v*"
@@ -105,6 +105,9 @@ jobs:
           archive_dir="$GITHUB_WORKSPACE/app/build/outputs/release-archive"
           mkdir -p "$archive_dir"
           cp app/build/outputs/apk/release/app-*-release.apk "$archive_dir/"
+          mapping_file="app/build/outputs/mapping/release/mapping.txt"
+          test -s "$mapping_file"
+          cp "$mapping_file" "$archive_dir/mapping.txt"
           (
             cd "$archive_dir"
             sha256sum app-*-release.apk > SHA256SUMS.txt
@@ -131,6 +134,8 @@ jobs:
 
           SHA-256 values are in SHA256SUMS.txt.
 
+          The release archive includes mapping.txt for crash de-obfuscation.
+
           ## Known limitations
 
           ZIP, RAR/RAR5, 7z, TAR, Zstandard and tar.zst are included. ZIP/TAR/Zstandard password encryption and RAR creation remain unavailable. AAB is intentionally not produced by this workflow.
@@ -147,6 +152,7 @@ jobs:
           path: |
             app/build/outputs/release-archive/app-*-release.apk
             app/build/outputs/release-archive/SHA256SUMS.txt
+            app/build/outputs/release-archive/mapping.txt
             app/build/outputs/release-archive/RELEASE_METADATA.md
 
       - name: Publish GitHub Release
@@ -160,4 +166,5 @@ jobs:
           files: |
             app/build/outputs/release-archive/app-*-release.apk
             app/build/outputs/release-archive/SHA256SUMS.txt
+            app/build/outputs/release-archive/mapping.txt
             app/build/outputs/release-archive/RELEASE_METADATA.md

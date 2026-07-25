@@ -11,6 +11,8 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import com.dai2010.betterpak.domain.ArchiveCreateOptions
+import com.dai2010.betterpak.domain.ArchiveErrorClassifier
+import com.dai2010.betterpak.domain.ArchiveEngine
 import com.dai2010.betterpak.domain.ArchiveFormat
 import com.dai2010.betterpak.domain.ArchiveItem
 import com.dai2010.betterpak.domain.ArchivePreview
@@ -19,6 +21,8 @@ import com.dai2010.betterpak.domain.ArchiveExtractOptions
 import com.dai2010.betterpak.domain.ArchivePath
 import com.dai2010.betterpak.domain.CompressionAlgorithm
 import com.dai2010.betterpak.domain.OverwritePolicy
+import com.dai2010.betterpak.domain.PreviewKind
+import com.dai2010.betterpak.domain.PreviewPolicy
 import com.github.junrar.Archive
 import com.github.luben.zstd.ZstdOutputStream
 import kotlinx.coroutines.CancellationException
@@ -47,14 +51,16 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 import kotlin.coroutines.coroutineContext
 
-object ArchiveRepository {
+object ArchiveRepository : ArchiveEngine {
     private const val MAX_LIST_ENTRIES = 100_000
     private const val MAX_PREVIEW_BYTES = 8L * 1024L * 1024L
     private const val MAX_STREAM_EXPANDED_BYTES = 50L * 1024L * 1024L * 1024L
     private const val BUFFER_SIZE = 32 * 1024
     private const val INTERNAL_STORAGE_DIRECTORY = "BetterPak"
+    private const val OPEN_CACHE_DIRECTORY = "betterpak-open"
+    private const val OPEN_CACHE_MAX_AGE_MILLIS = 24L * 60L * 60L * 1000L
 
-    fun supportedArchiveMimeTypes(): Array<String> = arrayOf(
+    override fun supportedArchiveMimeTypes(): Array<String> = arrayOf(
         "application/zip",
         "application/x-zip-compressed",
         "application/vnd.rar",
@@ -68,7 +74,7 @@ object ArchiveRepository {
         "application/x-gtar",
     )
 
-    fun initializeAppStorage(context: Context) {
+    override fun initializeAppStorage(context: Context) {
         cleanupTemporaryFiles(context)
         ensureInternalStorageDirectory(context)
     }
@@ -80,7 +86,7 @@ object ArchiveRepository {
         }
     }
 
-    fun cleanupTemporaryFiles(context: Context) {
+    override fun cleanupTemporaryFiles(context: Context) {
         context.cacheDir.listFiles().orEmpty().forEach { file ->
             if (
                 file.name.startsWith("betterpak-source-") ||
@@ -90,12 +96,17 @@ object ArchiveRepository {
                 file.deleteRecursively()
             }
         }
+        val openCache = File(context.cacheDir, OPEN_CACHE_DIRECTORY)
+        val expiration = System.currentTimeMillis() - OPEN_CACHE_MAX_AGE_MILLIS
+        openCache.listFiles().orEmpty()
+            .filter { it.lastModified() < expiration }
+            .forEach { it.deleteRecursively() }
         ensureInternalStorageDirectory(context).walkTopDown()
             .filter { it.isFile && it.name.endsWith(".part") }
             .forEach { it.delete() }
     }
 
-    suspend fun list(
+    override suspend fun list(
         context: Context,
         uri: Uri,
         password: String = "",
@@ -122,7 +133,7 @@ object ArchiveRepository {
         }
     }
 
-    suspend fun extract(
+    override suspend fun extract(
         context: Context,
         archiveUri: Uri,
         destinationUri: Uri,
@@ -202,7 +213,7 @@ object ArchiveRepository {
         }
     }
 
-    suspend fun createZip(
+    override suspend fun createZip(
         context: Context,
         inputUris: List<Uri>,
         outputUri: Uri,
@@ -269,7 +280,7 @@ object ArchiveRepository {
         }
     }
 
-    suspend fun createSevenZ(
+    override suspend fun createSevenZ(
         context: Context,
         inputUris: List<Uri>,
         outputUri: Uri,
@@ -330,7 +341,7 @@ object ArchiveRepository {
         }
     }
 
-    suspend fun createTar(
+    override suspend fun createTar(
         context: Context,
         inputUris: List<Uri>,
         outputUri: Uri,
@@ -338,7 +349,7 @@ object ArchiveRepository {
         onProgress: suspend (ArchiveProgress) -> Unit = {},
     ): Result<Int> = createTarArchive(context, inputUris, outputUri, false, options, onProgress)
 
-    suspend fun createTarZstandard(
+    override suspend fun createTarZstandard(
         context: Context,
         inputUris: List<Uri>,
         outputUri: Uri,
@@ -421,7 +432,7 @@ object ArchiveRepository {
         }
     }
 
-    suspend fun preview(
+    override suspend fun preview(
         context: Context,
         uri: Uri,
         path: String,
@@ -474,7 +485,7 @@ object ArchiveRepository {
         }
     }
 
-    suspend fun extractEntryToInternalStorage(
+    override suspend fun extractEntryToInternalStorage(
         context: Context,
         archiveUri: Uri,
         path: String,
@@ -504,9 +515,42 @@ object ArchiveRepository {
         }
     }
 
-    fun mimeTypeForPath(path: String): String = mimeTypeForName(path.substringAfterLast('/'))
+    override suspend fun extractEntryToCache(
+        context: Context,
+        archiveUri: Uri,
+        path: String,
+        password: String = "",
+        maxBytes: Long = MAX_STREAM_EXPANDED_BYTES,
+    ): Result<File> = operation {
+        withContext(Dispatchers.IO) {
+            val normalizedPath = ArchivePath.normalize(path) ?: error("条目路径不安全")
+            require(maxBytes in 1L..MAX_STREAM_EXPANDED_BYTES) { "文件展开大小超过限制" }
+            val format = detectFormat(context, archiveUri)
+            val source = copyToCache(context, archiveUri, format)
+            val cacheDirectory = File(context.cacheDir, OPEN_CACHE_DIRECTORY).apply {
+                require(isDirectory || mkdirs()) { "无法创建外部打开缓存目录" }
+            }
+            val name = safeSegment(normalizedPath.substringAfterLast('/'), "document")
+            val target = uniqueCacheTarget(cacheDirectory, name)
+            val temporary = File(target.parentFile, ".${target.name}.${UUID.randomUUID()}.part")
+            try {
+                temporary.outputStream().use { output ->
+                    writeInternalEntry(source, format, normalizedPath, password, output, maxBytes)
+                }
+                require(temporary.renameTo(target)) { "无法完成文件缓存" }
+                target
+            } catch (error: Throwable) {
+                temporary.delete()
+                throw error
+            } finally {
+                source.delete()
+            }
+        }
+    }
 
-    fun detectFormat(context: Context, uri: Uri): ArchiveFormat {
+    override fun mimeTypeForPath(path: String): String = mimeTypeForName(path.substringAfterLast('/'))
+
+    override fun detectFormat(context: Context, uri: Uri): ArchiveFormat {
         val header = ByteArray(TAR_HEADER_SIZE)
         val count = context.contentResolver.openInputStream(uri)?.use { input -> readAtMost(input, header) } ?: 0
         val name = displayName(context, uri).lowercase()
@@ -544,7 +588,7 @@ object ArchiveRepository {
         }
     }
 
-    fun persistUriPermission(context: Context, uri: Uri) {
+    override fun persistUriPermission(context: Context, uri: Uri) {
         runCatching {
             context.contentResolver.takePersistableUriPermission(
                 uri,
@@ -556,8 +600,9 @@ object ArchiveRepository {
     private suspend fun listRar(source: File, password: String): List<ArchiveItem> {
         openRar(source, password).use { archive ->
             require(archive.fileHeaders.size <= MAX_LIST_ENTRIES) { "压缩包文件数量超过限制" }
-            return archive.fileHeaders.mapNotNull { header ->
-                val path = ArchivePath.normalize(header.fileNameString) ?: return@mapNotNull null
+            return archive.fileHeaders.map { header ->
+                val path = ArchivePath.normalize(header.fileNameString)
+                    ?: error("归档包含不安全路径：${header.fileNameString}")
                 ArchiveItem(
                     path = path,
                     size = header.fullUnpackSize,
@@ -577,15 +622,14 @@ object ArchiveRepository {
                 if (items.size >= MAX_LIST_ENTRIES) error("压缩包文件数量超过限制")
                 val entry = entries.nextElement()
                 val path = ArchivePath.normalize(entry.name)
-                if (path != null) {
-                    items += ArchiveItem(
-                        path = path,
-                        size = entry.size,
-                        compressedSize = entry.compressedSize,
-                        modifiedTime = entry.time.takeIf { it >= 0L },
-                        isDirectory = entry.isDirectory,
-                    )
-                }
+                    ?: error("归档包含不安全路径：${entry.name}")
+                items += ArchiveItem(
+                    path = path,
+                    size = entry.size,
+                    compressedSize = entry.compressedSize,
+                    modifiedTime = entry.time.takeIf { it >= 0L },
+                    isDirectory = entry.isDirectory,
+                )
             }
             return items
         }
@@ -599,13 +643,12 @@ object ArchiveRepository {
                 coroutineContext.ensureActive()
                 if (items.size >= MAX_LIST_ENTRIES) error("压缩包文件数量超过限制")
                 val path = ArchivePath.normalize(entry.name)
-                if (path != null) {
-                    items += ArchiveItem(
-                        path = path,
-                        size = entry.size,
-                        isDirectory = entry.isDirectory,
-                    )
-                }
+                    ?: error("归档包含不安全路径：${entry.name}")
+                items += ArchiveItem(
+                    path = path,
+                    size = entry.size,
+                    isDirectory = entry.isDirectory,
+                )
                 entry = archive.nextEntry
             }
             return items
@@ -673,7 +716,8 @@ object ArchiveRepository {
             headers.forEachIndexed { index, header ->
                 coroutineContext.ensureActive()
                 val path = ArchivePath.normalize(header.fileNameString)
-                if (path == null || !isSelected(path, selectedPaths)) return@forEachIndexed
+                    ?: error("归档包含不安全路径：${header.fileNameString}")
+                if (!isSelected(path, selectedPaths)) return@forEachIndexed
                 if (header.isDirectory) {
                     ensureDirectory(root, path)
                     onProgress(ArchiveProgress(index + 1, headers.size, expandedBytes, -1L))
@@ -715,7 +759,8 @@ object ArchiveRepository {
                 if (++seenEntries > options.maxEntries) error("压缩包文件数量超过限制")
                 val entry = entries.nextElement()
                 val path = ArchivePath.normalize(entry.name)
-                if (path != null && isSelected(path, selectedPaths)) {
+                    ?: error("归档包含不安全路径：${entry.name}")
+                if (isSelected(path, selectedPaths)) {
                     if (entry.isDirectory) {
                         ensureDirectory(root, path)
                     } else {
@@ -754,7 +799,8 @@ object ArchiveRepository {
                 coroutineContext.ensureActive()
                 if (++seenEntries > options.maxEntries) error("压缩包文件数量超过限制")
                 val path = ArchivePath.normalize(entry.name)
-                if (path != null && isSelected(path, selectedPaths)) {
+                    ?: error("归档包含不安全路径：${entry.name}")
+                if (isSelected(path, selectedPaths)) {
                     if (entry.isDirectory) {
                         ensureDirectory(root, path)
                     } else {
@@ -1086,12 +1132,7 @@ object ArchiveRepository {
     }
 
     private fun isTextPreview(name: String, mimeType: String): Boolean {
-        if (mimeType.startsWith("text/")) return true
-        val extension = name.substringAfterLast('.', "").lowercase()
-        if (extension in setOf("json", "xml", "yaml", "yml", "toml", "ini", "csv", "md", "kt", "java", "py", "js", "css", "html", "log")) {
-            return true
-        }
-        return false
+        return PreviewPolicy.decide(name, mimeType).kind == PreviewKind.TEXT
     }
 
     private fun decodeTextPreview(payload: ByteArray): String? {
@@ -1116,7 +1157,8 @@ object ArchiveRepository {
 
     private fun mimeTypeForName(name: String): String {
         val extension = name.substringAfterLast('.', "").lowercase()
-        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+        return PreviewPolicy.mimeTypeForName(name).takeUnless { it == "application/octet-stream" }
+            ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
             ?: when (extension) {
                 "aac" -> "audio/aac"
                 "flac" -> "audio/flac"
@@ -1258,6 +1300,18 @@ object ArchiveRepository {
             if (!candidate.exists()) return candidate
             index++
         }
+    }
+
+    private fun uniqueCacheTarget(root: File, name: String): File {
+        val extension = name.substringAfterLast('.', "").takeIf { it.isNotBlank() }?.let { ".${it}" }.orEmpty()
+        val stem = name.removeSuffix(extension)
+        var candidate = File(root, name)
+        var index = 1
+        while (candidate.exists()) {
+            candidate = File(root, "$stem ($index)$extension")
+            index++
+        }
+        return candidate
     }
 
     private suspend fun copyWithProgress(
@@ -1483,7 +1537,7 @@ object ArchiveRepository {
     } catch (error: CancellationException) {
         throw error
     } catch (error: Throwable) {
-        Result.failure(error)
+        Result.failure(ArchiveErrorClassifier.wrap(error))
     }
 
     private data class TargetFile(
