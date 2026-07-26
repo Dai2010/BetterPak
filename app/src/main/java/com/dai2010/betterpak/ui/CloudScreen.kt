@@ -140,10 +140,11 @@ fun CloudScreen(
             }
             if (state.busy) {
                 item {
+                    val progress = state.progress
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (state.progress != null) {
+                        if (progress != null) {
                             LinearProgressIndicator(
-                                progress = { state.progress.fraction },
+                                progress = { progress.fraction },
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         } else {
