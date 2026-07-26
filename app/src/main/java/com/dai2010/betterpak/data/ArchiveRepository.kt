@@ -21,6 +21,8 @@ import com.dai2010.betterpak.domain.ArchivePreview
 import com.dai2010.betterpak.domain.ArchiveProgress
 import com.dai2010.betterpak.domain.ArchiveExtractOptions
 import com.dai2010.betterpak.domain.ArchivePath
+import com.dai2010.betterpak.domain.ArchiveFormatResolver
+import com.dai2010.betterpak.domain.ArchiveSelection
 import com.dai2010.betterpak.domain.CompressionAlgorithm
 import com.dai2010.betterpak.domain.OverwritePolicy
 import com.dai2010.betterpak.domain.PreviewKind
@@ -583,15 +585,7 @@ object ArchiveRepository : ArchiveEngine {
         if (isTarHeader(header, count) || isTarArchive(context, uri)) {
             return ArchiveFormat.TAR
         }
-        return when {
-            name.endsWith(".zip") -> ArchiveFormat.ZIP
-            name.endsWith(".rar") -> ArchiveFormat.RAR
-            name.endsWith(".7z") -> ArchiveFormat.SEVEN_Z
-            name.endsWith(".tar.zst") || name.endsWith(".tzst") -> ArchiveFormat.TAR_ZSTANDARD
-            name.endsWith(".zst") || name.endsWith(".zstd") -> ArchiveFormat.ZSTANDARD
-            name.endsWith(".tar") -> ArchiveFormat.TAR
-            else -> ArchiveFormat.UNKNOWN
-        }
+        return ArchiveFormatResolver.fromFileName(name)
     }
 
     override fun persistUriPermission(context: Context, uri: Uri) {
@@ -1481,8 +1475,7 @@ object ArchiveRepository : ArchiveEngine {
     }
 
     private fun isSelected(path: String, selectedPaths: Set<String>?): Boolean {
-        if (selectedPaths == null) return true
-        return selectedPaths.any { selected -> path == selected || path.startsWith("$selected/") }
+        return ArchiveSelection.includes(path, selectedPaths)
     }
 
     private fun readAtMost(input: InputStream, buffer: ByteArray): Int {

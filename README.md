@@ -13,7 +13,7 @@
 - 归档引擎通过领域 `ArchiveEngine` 边界提供识别、列表、预览、创建、解压、取消和进度；非法 ZIP/RAR/7z/TAR 路径不再静默跳过，错误会分类为安全、限制、权限、密码或损坏等类型。
 - 创建和完整解压会保存来源 URI、目标 URI、格式、状态、错误类型、进度摘要和时间，主页通过 ViewModel 观察任务；密码不进入任务记录、设置、日志或通知。
 - 设置页可保存最大条目数、最大展开体积、最大预览大小和覆盖策略；默认限制仍为 100000 条目、50 GiB 展开体积和 8 MiB 预览。
-- v0.0.7 已加入 OneDrive/Google Drive 的统一云端契约、官方 API v3/Graph 传输 provider、PKCE OAuth 工具、Keystore 加密 Token 存储、下载原子替换和可恢复分片上传；云端登录 UI、真实账号验收和发布配置仍待 Android/CI 环境完成。
+- v0.0.7 已加入 OneDrive/Google Drive 的统一云端契约、Compose 登录/目录/上传下载 UI、官方 API v3/Graph 传输 provider、PKCE OAuth 回调、Keystore 加密 Token 存储、下载原子替换和可恢复分片上传；真实账号互操作和发布配置仍待 Android/CI 环境完成。
 - 云端接入不保存 client secret，不把 Token 放进任务记录或日志；百度网盘、华为个人云空间和其他专用 SDK 不在接入范围内。
 - 本机不要求 Android SDK；Release workflow 通过 `.github/workflows/release.yml` 在 GitHub Actions 执行 `test`、`lintRelease`、四种 ABI APK 构建和签名校验，并归档 APK、SHA-256 和运行元数据。
 - 公开 ZIP、RAR4/RAR5 和 7z 样本以及本地 TAR/Zstandard 互操作验收可运行 `./scripts/format-sample-acceptance.sh`；测试样本只在临时目录中使用，网络受限时可用 `BETTERPAK_SAMPLE_DIRECTORY` 或显式运行 `BETTERPAK_SKIP_PUBLIC_SAMPLES=1` 的本地检查。
@@ -21,3 +21,10 @@
 Release workflow 在远程使用 GitHub Secrets 中的 PKCS#12 发布密钥签名 APK，不把密钥写入仓库。所以不要尝试在仓库里找密钥。
 
 详细的 v0.0.5 格式验收、v0.0.6 实现记录、v0.0.7 云端接入记录、依赖审计和签名流程见 [格式验收](docs/v0.0.5-format-acceptance.md)、[v0.0.6 实现记录](docs/v0.0.6-implementation.md)、[v0.0.7 云端接入记录](docs/v0.0.7-cloud-integration.md) 和 [依赖审计](docs/dependency-audit-v0.0.5.md)；当前执行顺序以工作区根目录的 `NEXT_PLAN.md` 为准。
+
+## 云端配置
+
+- 在应用资源覆盖层中设置 `onedrive_client_id` 和 `google_drive_client_id`；默认值为空，未配置的平台会在 UI 中显示为不可用。移动端 client ID 不是 client secret，仓库和 APK 不保存 secret。
+- 两个平台均使用 `com.dai2010.betterpak://oauth/onedrive` 或 `com.dai2010.betterpak://oauth/google-drive` 回调，注册应用时必须配置完全相同的回调地址。
+- OneDrive 使用 `offline_access` + `Files.ReadWrite` 以支持个人账号的目录、下载和上传；Google Drive 默认使用 `drive.file`，只承诺访问由应用创建或用户明确交给应用的文件，不把整个云盘读写权限默认为已支持。
+- 云端缓存位于应用专属 cache，下载内容通过现有 `ArchiveEngine` 处理；退出登录会删除令牌、账号记录和云端缓存。百度网盘、华为个人云空间和其他专用 SDK 仍不接入。

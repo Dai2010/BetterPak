@@ -21,6 +21,24 @@ class OneDriveProvider internal constructor(
 ) : CloudProvider {
     override val providerId: CloudProviderId = CloudProviderId.ONEDRIVE
 
+    override suspend fun currentAccount(accountKey: String): Result<CloudAccount> = guarded {
+        val json = JSONObject(
+            httpClient.getJson(
+                accountId = accountKey,
+                url = "$GRAPH_ROOT/me?%24select=id,displayName,mail,userPrincipalName",
+            ),
+        )
+        val id = json.optString("id", "")
+        require(id.isNotBlank()) { "OneDrive 未返回账号标识" }
+        CloudAccount(
+            id = id,
+            provider = providerId,
+            displayName = json.optString("displayName", "OneDrive 用户"),
+            email = json.optString("mail", null)
+                ?: json.optString("userPrincipalName", null),
+        )
+    }
+
     override suspend fun listChildren(
         account: CloudAccount,
         parentId: String?,

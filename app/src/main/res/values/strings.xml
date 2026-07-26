@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">BetterPak</string>
+    <string name="onedrive_client_id"></string>
+    <string name="google_drive_client_id"></string>
+    <string name="onedrive_scopes">offline_access Files.ReadWrite</string>
+    <string name="google_drive_scopes">openid email profile https://www.googleapis.com/auth/drive.file</string>
 </resources>

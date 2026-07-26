@@ -6,14 +6,31 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.dai2010.betterpak.data.ArchiveEngineProvider
 import com.dai2010.betterpak.ui.BetterPakApp
 
 class MainActivity : ComponentActivity() {
+    private var cloudCallbackUri by mutableStateOf<Uri?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ArchiveEngineProvider.engine.initializeAppStorage(this)
-        setContent { BetterPakApp(initialArchiveUri = sharedUri(intent)) }
+        cloudCallbackUri = cloudCallback(intent)
+        setContent {
+            BetterPakApp(
+                initialArchiveUri = sharedUri(intent),
+                cloudCallbackUri = cloudCallbackUri,
+            )
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        cloudCallbackUri = cloudCallback(intent)
     }
 
     private fun sharedUri(intent: Intent?): Uri? {
@@ -26,6 +43,12 @@ class MainActivity : ComponentActivity() {
                 intent.getParcelableExtra(Intent.EXTRA_STREAM)
             }
         }
-        return intent.data
+        return intent.data?.takeUnless {
+            it.scheme == "com.dai2010.betterpak" && it.host == "oauth"
+        }
+    }
+
+    private fun cloudCallback(intent: Intent?): Uri? = intent?.data?.takeIf {
+        it.scheme == "com.dai2010.betterpak" && it.host == "oauth"
     }
 }

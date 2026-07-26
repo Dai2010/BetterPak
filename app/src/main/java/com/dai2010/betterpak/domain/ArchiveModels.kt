@@ -83,6 +83,28 @@ enum class ArchiveFormat(
     ),
 }
 
+object ArchiveFormatResolver {
+    fun fromFileName(name: String): ArchiveFormat {
+        val lowerName = name.substringAfterLast('/').lowercase()
+        return when {
+            lowerName.endsWith(".tar.zst") || lowerName.endsWith(".tzst") -> ArchiveFormat.TAR_ZSTANDARD
+            lowerName.endsWith(".zip") -> ArchiveFormat.ZIP
+            lowerName.endsWith(".rar") -> ArchiveFormat.RAR
+            lowerName.endsWith(".7z") -> ArchiveFormat.SEVEN_Z
+            lowerName.endsWith(".zst") || lowerName.endsWith(".zstd") -> ArchiveFormat.ZSTANDARD
+            lowerName.endsWith(".tar") -> ArchiveFormat.TAR
+            else -> ArchiveFormat.UNKNOWN
+        }
+    }
+}
+
+object ArchiveSelection {
+    fun includes(path: String, selectedPaths: Set<String>?): Boolean {
+        if (selectedPaths == null) return true
+        return selectedPaths.any { selected -> path == selected || path.startsWith("$selected/") }
+    }
+}
+
 data class ArchiveItem(
     val path: String,
     val size: Long,

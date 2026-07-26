@@ -9,4 +9,7 @@
     <cache-path
         name="betterpak_open_cache"
         path="betterpak-open/" />
+    <cache-path
+        name="betterpak_cloud_cache"
+        path="betterpak-cloud/" />
 </paths>

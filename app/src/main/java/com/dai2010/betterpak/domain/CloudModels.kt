@@ -90,6 +90,8 @@ interface CloudTokenProvider {
 interface CloudProvider {
     val providerId: CloudProviderId
 
+    suspend fun currentAccount(accountKey: String): Result<CloudAccount>
+
     suspend fun listChildren(
         account: CloudAccount,
         parentId: String? = null,

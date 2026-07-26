@@ -22,6 +22,23 @@ class GoogleDriveProvider internal constructor(
 ) : CloudProvider {
     override val providerId: CloudProviderId = CloudProviderId.GOOGLE_DRIVE
 
+    override suspend fun currentAccount(accountKey: String): Result<CloudAccount> = guarded {
+        val user = JSONObject(
+            httpClient.getJson(
+                accountId = accountKey,
+                url = "$DRIVE_ROOT/about?fields=user",
+            ),
+        ).getJSONObject("user")
+        val id = user.optString("permissionId", user.optString("displayName", ""))
+        require(id.isNotBlank()) { "Google Drive 未返回账号标识" }
+        CloudAccount(
+            id = id,
+            provider = providerId,
+            displayName = user.optString("displayName", "Google Drive 用户"),
+            email = user.optString("emailAddress", null),
+        )
+    }
+
     override suspend fun listChildren(
         account: CloudAccount,
         parentId: String?,

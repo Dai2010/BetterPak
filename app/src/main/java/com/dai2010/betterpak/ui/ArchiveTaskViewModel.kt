@@ -10,6 +10,7 @@ import com.dai2010.betterpak.domain.ArchiveTaskEvent
 import com.dai2010.betterpak.domain.ArchiveTaskKind
 import com.dai2010.betterpak.domain.ArchiveTaskStateMachine
 import com.dai2010.betterpak.domain.ArchiveTaskStatus
+import com.dai2010.betterpak.domain.ArchiveTaskValidation
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,6 +40,18 @@ class ArchiveTaskViewModel(private val store: ArchiveTaskStore) : ViewModel() {
         targetUri: String,
         format: ArchiveFormat,
     ): ArchiveTask {
+        require(
+            ArchiveTaskValidation.canExecute(
+                ArchiveTask(
+                    id = "validation",
+                    kind = kind,
+                    sourceUri = sourceUri,
+                    targetUri = targetUri,
+                    format = format,
+                    createdAt = 0L,
+                ),
+            ),
+        ) { "任务来源或目标 URI 无效" }
         val now = System.currentTimeMillis()
         return ArchiveTask(
             id = UUID.randomUUID().toString(),
