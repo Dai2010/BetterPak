@@ -15,7 +15,7 @@ import java.time.Instant
 import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 
-class OneDriveProvider(
+class OneDriveProvider internal constructor(
     tokenProvider: CloudTokenProvider,
     private val httpClient: CloudHttpClient = CloudHttpClient(tokenProvider),
 ) : CloudProvider {

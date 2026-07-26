@@ -254,7 +254,14 @@ internal class CloudHttpClient(
         val input = FileInputStream(source)
         try {
             skipFully(input, start)
-            copyStream(input, output, totalBytes, start, length, onProgress)
+            copyStream(
+                input,
+                output,
+                totalBytes,
+                start,
+                maxBytes = length,
+                onProgress = onProgress,
+            )
         } finally {
             input.close()
         }

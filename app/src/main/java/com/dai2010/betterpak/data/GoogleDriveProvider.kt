@@ -16,7 +16,7 @@ import java.time.Instant
 import kotlinx.coroutines.CancellationException
 import org.json.JSONObject
 
-class GoogleDriveProvider(
+class GoogleDriveProvider internal constructor(
     tokenProvider: CloudTokenProvider,
     private val httpClient: CloudHttpClient = CloudHttpClient(tokenProvider),
 ) : CloudProvider {
