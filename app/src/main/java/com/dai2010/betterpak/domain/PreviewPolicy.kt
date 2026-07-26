@@ -15,6 +15,8 @@ data class PreviewDecision(
 )
 
 object PreviewPolicy {
+    const val EXTERNAL_DOCUMENT_CACHE_MAX_BYTES = 256L * 1024L * 1024L
+
     private val textExtensions = setOf(
         "c",
         "cc",
@@ -97,6 +99,15 @@ object PreviewPolicy {
 
     fun isExternalDocument(path: String): Boolean =
         decide(path).kind == PreviewKind.EXTERNAL_DOCUMENT
+
+    fun cacheLimitFor(path: String, requestedBytes: Long): Long =
+        requestedBytes.coerceAtLeast(1L).let { requested ->
+            if (isExternalDocument(path)) {
+                requested.coerceAtMost(EXTERNAL_DOCUMENT_CACHE_MAX_BYTES)
+            } else {
+                requested
+            }
+        }
 
     private fun extensionOf(path: String): String =
         path.substringAfterLast('/', path).substringAfterLast('.', "").lowercase()

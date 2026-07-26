@@ -95,6 +95,7 @@ import com.dai2010.betterpak.domain.ArchiveFormat
 import com.dai2010.betterpak.domain.ArchiveItem
 import com.dai2010.betterpak.domain.ArchivePreview
 import com.dai2010.betterpak.domain.ArchiveProgress
+import com.dai2010.betterpak.domain.PreviewPolicy
 import com.dai2010.betterpak.domain.OverwritePolicy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -407,7 +408,10 @@ fun PreviewBrowserScreen(
                     archiveUri = request.archiveUri,
                     path = path,
                     password = request.password,
-                    maxBytes = request.extractOptions.maxExpandedBytes,
+                    maxBytes = PreviewPolicy.cacheLimitFor(
+                        path,
+                        request.extractOptions.maxExpandedBytes,
+                    ),
                 )
                 result.fold(
                     onSuccess = { file ->

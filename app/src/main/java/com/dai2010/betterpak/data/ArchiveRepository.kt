@@ -11,10 +11,12 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import com.dai2010.betterpak.domain.ArchiveCreateOptions
+import com.dai2010.betterpak.domain.ArchiveErrorCode
 import com.dai2010.betterpak.domain.ArchiveErrorClassifier
 import com.dai2010.betterpak.domain.ArchiveEngine
 import com.dai2010.betterpak.domain.ArchiveFormat
 import com.dai2010.betterpak.domain.ArchiveItem
+import com.dai2010.betterpak.domain.ArchiveOperationException
 import com.dai2010.betterpak.domain.ArchivePreview
 import com.dai2010.betterpak.domain.ArchiveProgress
 import com.dai2010.betterpak.domain.ArchiveExtractOptions
@@ -440,7 +442,8 @@ object ArchiveRepository : ArchiveEngine {
         maxBytes: Long,
     ): Result<ArchivePreview> = operation {
         withContext(Dispatchers.IO) {
-            val normalizedPath = ArchivePath.normalize(path) ?: error("条目路径不安全")
+            val normalizedPath = ArchivePath.normalize(path)
+                ?: throw ArchiveOperationException(ArchiveErrorCode.INVALID_PATH, "条目路径不安全")
             val previewLimit = maxBytes.coerceIn(1L, MAX_PREVIEW_BYTES)
             val format = detectFormat(context, uri)
             val source = copyToCache(context, uri, format)
@@ -493,7 +496,8 @@ object ArchiveRepository : ArchiveEngine {
         maxBytes: Long,
     ): Result<File> = operation {
         withContext(Dispatchers.IO) {
-            val normalizedPath = ArchivePath.normalize(path) ?: error("条目路径不安全")
+            val normalizedPath = ArchivePath.normalize(path)
+                ?: throw ArchiveOperationException(ArchiveErrorCode.INVALID_PATH, "条目路径不安全")
             val format = detectFormat(context, archiveUri)
             val source = copyToCache(context, archiveUri, format)
             val root = ensureInternalStorageDirectory(context)
@@ -523,8 +527,10 @@ object ArchiveRepository : ArchiveEngine {
         maxBytes: Long,
     ): Result<File> = operation {
         withContext(Dispatchers.IO) {
-            val normalizedPath = ArchivePath.normalize(path) ?: error("条目路径不安全")
+            val normalizedPath = ArchivePath.normalize(path)
+                ?: throw ArchiveOperationException(ArchiveErrorCode.INVALID_PATH, "条目路径不安全")
             require(maxBytes in 1L..MAX_STREAM_EXPANDED_BYTES) { "文件展开大小超过限制" }
+            val effectiveMaxBytes = PreviewPolicy.cacheLimitFor(normalizedPath, maxBytes)
             val format = detectFormat(context, archiveUri)
             val source = copyToCache(context, archiveUri, format)
             val cacheDirectory = File(context.cacheDir, OPEN_CACHE_DIRECTORY).apply {
@@ -535,7 +541,7 @@ object ArchiveRepository : ArchiveEngine {
             val temporary = File(target.parentFile, ".${target.name}.${UUID.randomUUID()}.part")
             try {
                 temporary.outputStream().use { output ->
-                    writeInternalEntry(source, format, normalizedPath, password, output, maxBytes)
+                    writeInternalEntry(source, format, normalizedPath, password, output, effectiveMaxBytes)
                 }
                 require(temporary.renameTo(target)) { "无法完成文件缓存" }
                 target

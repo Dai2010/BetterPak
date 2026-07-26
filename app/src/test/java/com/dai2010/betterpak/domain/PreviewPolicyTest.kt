@@ -25,4 +25,16 @@ class PreviewPolicyTest {
         assertEquals(PreviewKind.VIDEO, PreviewPolicy.decide("clip.mkv").kind)
         assertEquals(PreviewKind.UNSUPPORTED, PreviewPolicy.decide("payload.bin").kind)
     }
+
+    @Test
+    fun appliesIndependentExternalDocumentCacheLimit() {
+        assertEquals(
+            PreviewPolicy.EXTERNAL_DOCUMENT_CACHE_MAX_BYTES,
+            PreviewPolicy.cacheLimitFor("report.docx", 50L * 1024L * 1024L * 1024L),
+        )
+        assertEquals(
+            4L * 1024L * 1024L,
+            PreviewPolicy.cacheLimitFor("notes.txt", 4L * 1024L * 1024L),
+        )
+    }
 }

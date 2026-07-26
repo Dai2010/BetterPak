@@ -1,5 +1,9 @@
 package com.dai2010.betterpak.domain
 
+import java.io.FileNotFoundException
+import java.io.IOException
+import java.util.zip.ZipException
+
 enum class ArchiveErrorCode(val retryable: Boolean) {
     INVALID_PATH(false),
     LIMIT_EXCEEDED(false),
@@ -27,6 +31,18 @@ object ArchiveErrorClassifier {
     }
 
     fun classify(error: Throwable): ArchiveErrorCode {
+        when (error) {
+            is ArchiveOperationException -> return error.code
+            is SecurityException,
+            is FileNotFoundException,
+            -> return ArchiveErrorCode.PERMISSION_REVOKED
+            is ZipException -> return ArchiveErrorCode.CORRUPT_ARCHIVE
+        }
+
+        error.cause?.let { cause ->
+            classifyCause(cause)?.let { return it }
+        }
+
         val message = error.message.orEmpty().lowercase()
         return when {
             "路径" in message || "path" in message -> ArchiveErrorCode.INVALID_PATH
@@ -39,5 +55,21 @@ object ArchiveErrorClassifier {
             "损坏" in message || "corrupt" in message || "checksum" in message -> ArchiveErrorCode.CORRUPT_ARCHIVE
             else -> ArchiveErrorCode.UNKNOWN
         }
+    }
+
+    private fun classifyCause(error: Throwable): ArchiveErrorCode? = when (error) {
+        is ArchiveOperationException -> error.code
+        is SecurityException,
+        is FileNotFoundException,
+        -> ArchiveErrorCode.PERMISSION_REVOKED
+        is ZipException -> ArchiveErrorCode.CORRUPT_ARCHIVE
+        is IOException -> error.message?.lowercase()?.let { message ->
+            when {
+                "no space" in message || "空间" in message -> ArchiveErrorCode.INSUFFICIENT_STORAGE
+                "permission" in message || "权限" in message -> ArchiveErrorCode.PERMISSION_REVOKED
+                else -> null
+            }
+        }
+        else -> null
     }
 }
