@@ -325,7 +325,7 @@ class ZipArchiveCore(
             commitStagedFiles(stagingDirectory, normalizedDestination, overwritePolicy)
             selectedEntries.count { !it.isDirectory }
         } finally {
-            Files.deleteRecursivelyIfExists(stagingDirectory)
+            stagingDirectory.deleteRecursivelyIfExists()
         }
     }
 
