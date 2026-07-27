@@ -1,6 +1,4 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
-    <uses-permission android:name="android.permission.INTERNET" />
-
     <application
         android:allowBackup="true"
         android:icon="@drawable/betterpak_icon"
@@ -8,18 +6,6 @@
         android:roundIcon="@drawable/betterpak_icon"
         android:supportsRtl="true"
         android:theme="@style/Theme.BetterPak">
-        <meta-data
-            android:name="com.dai2010.betterpak.cloud.onedrive.client_id"
-            android:value="@string/onedrive_client_id" />
-        <meta-data
-            android:name="com.dai2010.betterpak.cloud.google_drive.client_id"
-            android:value="@string/google_drive_client_id" />
-        <meta-data
-            android:name="com.dai2010.betterpak.cloud.onedrive.scopes"
-            android:value="@string/onedrive_scopes" />
-        <meta-data
-            android:name="com.dai2010.betterpak.cloud.google_drive.scopes"
-            android:value="@string/google_drive_scopes" />
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -66,12 +52,6 @@
             <data android:mimeType="application/x-zstd" />
             <data android:mimeType="application/x-tar" />
             <data android:mimeType="application/x-gtar" />
-        </intent-filter>
-        <intent-filter>
-            <action android:name="android.intent.action.VIEW" />
-            <category android:name="android.intent.category.DEFAULT" />
-            <category android:name="android.intent.category.BROWSABLE" />
-            <data android:scheme="com.dai2010.betterpak" android:host="oauth" />
         </intent-filter>
         </activity>
     </application>

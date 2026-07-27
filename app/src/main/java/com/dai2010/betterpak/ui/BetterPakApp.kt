@@ -26,7 +26,6 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.CheckCircle
-import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.FolderOpen
@@ -105,20 +104,16 @@ private object Routes {
     const val PREVIEW = "preview"
     const val PREVIEW_BROWSER = "preview_browser"
     const val SETTINGS = "settings"
-    const val CLOUD = "cloud"
 }
 
 @Composable
-fun BetterPakApp(initialArchiveUri: Uri? = null, cloudCallbackUri: Uri? = null) {
+fun BetterPakApp(initialArchiveUri: Uri? = null) {
     val context = LocalContext.current
     val settingsRepository = remember { SettingsRepository(context.applicationContext) }
     val settings by settingsRepository.settings.collectAsState(initial = AppSettings())
     val taskStore = remember { ArchiveTaskStore(context.applicationContext) }
     val taskViewModel: ArchiveTaskViewModel = viewModel(
         factory = ArchiveTaskViewModelFactory(taskStore),
-    )
-    val cloudViewModel: CloudViewModel = viewModel(
-        factory = CloudViewModelFactory(context.applicationContext),
     )
     val tasks by taskViewModel.tasks.collectAsState()
     val navController = rememberNavController()
@@ -129,7 +124,6 @@ fun BetterPakApp(initialArchiveUri: Uri? = null, cloudCallbackUri: Uri? = null) 
         NavHost(
             navController = navController,
             startDestination = when {
-                cloudCallbackUri != null -> Routes.CLOUD
                 initialArchiveUri != null -> Routes.PREVIEW
                 else -> Routes.HOME
             },
@@ -140,7 +134,6 @@ fun BetterPakApp(initialArchiveUri: Uri? = null, cloudCallbackUri: Uri? = null) 
                     onCreate = { navController.navigate(Routes.CREATE) },
                     onExtract = { navController.navigate(Routes.EXTRACT) },
                     onPreview = { navController.navigate(Routes.PREVIEW) },
-                    onCloud = { navController.navigate(Routes.CLOUD) },
                     onSettings = { navController.navigate(Routes.SETTINGS) },
                 )
             }
@@ -166,17 +159,6 @@ fun BetterPakApp(initialArchiveUri: Uri? = null, cloudCallbackUri: Uri? = null) 
                     onOpenPreview = { request ->
                         previewRequest = request
                         navController.navigate(Routes.PREVIEW_BROWSER)
-                    },
-                )
-            }
-            composable(Routes.CLOUD) {
-                CloudScreen(
-                    viewModel = cloudViewModel,
-                    callbackUri = cloudCallbackUri,
-                    onBack = { navController.popBackStack() },
-                    onOpenArchive = { uri ->
-                        previewArchiveUri = uri
-                        navController.navigate(Routes.PREVIEW)
                     },
                 )
             }
@@ -207,7 +189,6 @@ private fun HomeScreen(
     onCreate: () -> Unit,
     onExtract: () -> Unit,
     onPreview: () -> Unit,
-    onCloud: () -> Unit,
     onSettings: () -> Unit,
 ) {
     Scaffold(
@@ -245,14 +226,6 @@ private fun HomeScreen(
                     subtitle = "选择文件，设置格式和高级压缩参数",
                     icon = Icons.Outlined.Upload,
                     onClick = onCreate,
-                )
-            }
-            item {
-                HomeActionCard(
-                    title = "云端文件",
-                    subtitle = "登录 OneDrive 或 Google Drive，浏览、下载和上传文件",
-                    icon = Icons.Outlined.Cloud,
-                    onClick = onCloud,
                 )
             }
             item {

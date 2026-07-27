@@ -1,7 +1,7 @@
 # BetterPak
 一个方便，快速的压缩包管理器
 
-## 当前进度（v0.0.7 开发中）
+## 当前进度（v0.0.8 开发中）
 
 - 首轮接入 ZIP 浏览、解压、创建、文本/图片/音视频预览，以及 RAR/RAR5、7z、TAR、Zstandard `.zst` 和 TAR+Zstandard `.tar.zst` 浏览、解压、预览。
 - 主页区分创建、解压和预览；设置页提供跟随系统、浅色、深色和自定义 Material You 主题色。
@@ -11,20 +11,18 @@
 - 音频和视频详情页提供播放/暂停、进度拖动和倍速控制；无法安全预览或播放器不支持的条目不会自动打开，用户明确点击后才会受限解压到缓存，并通过 `FileProvider` 和 `Intent.createChooser()` 交给系统选择应用。
 - PDF、DOC/DOCX、XLS/XLSX、PPT/PPTX、ODF 文档不在 APK 内置办公套件；BetterPak 不执行宏、脚本或嵌套归档，没有外部处理器时仍可选择安全解压。
 - 归档引擎通过领域 `ArchiveEngine` 边界提供识别、列表、预览、创建、解压、取消和进度；非法 ZIP/RAR/7z/TAR 路径不再静默跳过，错误会分类为安全、限制、权限、密码或损坏等类型。
+- `v0.0.8` 已开始增加独立的 Kotlin/JVM `archive-core`；首轮提供 ZIP 的路径安全、列表、创建、事务式解压、单条目读取、取消和限制测试，RAR/7z/TAR/Zstandard 与 Android SAF 适配仍按 `NEXT_PLAN.md` 分阶段迁移。
 - 创建和完整解压会保存来源 URI、目标 URI、格式、状态、错误类型、进度摘要和时间，主页通过 ViewModel 观察任务；密码不进入任务记录、设置、日志或通知。
 - 设置页可保存最大条目数、最大展开体积、最大预览大小和覆盖策略；默认限制仍为 100000 条目、50 GiB 展开体积和 8 MiB 预览。
-- v0.0.7 已加入 OneDrive/Google Drive 的统一云端契约、Compose 登录/目录/上传下载 UI、官方 API v3/Graph 传输 provider、PKCE OAuth 回调、Keystore 加密 Token 存储、下载原子替换和可恢复分片上传；真实账号互操作和发布配置仍待 Android/CI 环境完成。
-- 云端接入不保存 client secret，不把 Token 放进任务记录或日志；百度网盘、华为个人云空间和其他专用 SDK 不在接入范围内。
-- 本机不要求 Android SDK；Release workflow 通过 `.github/workflows/release.yml` 在 GitHub Actions 执行 `test`、`lintRelease`、四种 ABI APK 构建和签名校验，并归档 APK、SHA-256 和运行元数据。
+- v0.0.8 移除 OneDrive/Google Drive 云盘入口、OAuth、Token 存储和网络 provider，避免发布无法完成登录配置的功能；原因和范围见 [v0.0.8 更新说明](docs/v0.0.8-release-notes.md)。
+- 本机不要求 Android SDK；Release workflow 通过 `.github/workflows/release.yml` 执行 `:archive-core:test`、`test`、`lintRelease`、四种 ABI APK 构建和签名校验，并归档 APK、SHA-256 和运行元数据。
 - 公开 ZIP、RAR4/RAR5 和 7z 样本以及本地 TAR/Zstandard 互操作验收可运行 `./scripts/format-sample-acceptance.sh`；测试样本只在临时目录中使用，网络受限时可用 `BETTERPAK_SAMPLE_DIRECTORY` 或显式运行 `BETTERPAK_SKIP_PUBLIC_SAMPLES=1` 的本地检查。
 
 Release workflow 在远程使用 GitHub Secrets 中的 PKCS#12 发布密钥签名 APK，不把密钥写入仓库。所以不要尝试在仓库里找密钥。
 
-详细的 v0.0.5 格式验收、v0.0.6 实现记录、v0.0.7 云端接入记录、依赖审计和签名流程见 [格式验收](docs/v0.0.5-format-acceptance.md)、[v0.0.6 实现记录](docs/v0.0.6-implementation.md)、[v0.0.7 云端接入记录](docs/v0.0.7-cloud-integration.md) 和 [依赖审计](docs/dependency-audit-v0.0.5.md)；当前执行顺序以工作区根目录的 `NEXT_PLAN.md` 为准。
+详细的 v0.0.5 格式验收、v0.0.6 实现记录、v0.0.8 更新说明、`archive-core` Spike、依赖审计和签名流程见 [格式验收](docs/v0.0.5-format-acceptance.md)、[v0.0.6 实现记录](docs/v0.0.6-implementation.md)、[v0.0.8 更新说明](docs/v0.0.8-release-notes.md)、[v0.0.8 `archive-core` Spike](docs/v0.0.8-archive-core-spike.md) 和 [依赖审计](docs/dependency-audit-v0.0.5.md)；当前执行顺序以工作区根目录的 `NEXT_PLAN.md` 为准。
 
-## 云端配置
+## v0.0.8 更新说明
 
-- 在应用资源覆盖层中设置 `onedrive_client_id` 和 `google_drive_client_id`；默认值为空，未配置的平台会在 UI 中显示为不可用。移动端 client ID 不是 client secret，仓库和 APK 不保存 secret。
-- 两个平台均使用 `com.dai2010.betterpak://oauth/onedrive` 或 `com.dai2010.betterpak://oauth/google-drive` 回调，注册应用时必须配置完全相同的回调地址。
-- OneDrive 使用 `offline_access` + `Files.ReadWrite` 以支持个人账号的目录、下载和上传；Google Drive 默认使用 `drive.file`，只承诺访问由应用创建或用户明确交给应用的文件，不把整个云盘读写权限默认为已支持。
-- 云端缓存位于应用专属 cache，下载内容通过现有 `ArchiveEngine` 处理；退出登录会删除令牌、账号记录和云端缓存。百度网盘、华为个人云空间和其他专用 SDK 仍不接入。
+- 暂时移除 OneDrive/Google Drive 云盘功能及其 OAuth 实现。
+- 原因是当前个人 Microsoft 账号无法在 Microsoft Entra 目录外完成应用注册，无法为普通用户提供稳定可用的登录流程；Google Drive 也不适合作为国内使用环境的发布依赖。

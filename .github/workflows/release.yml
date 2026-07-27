@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag, for example v0.0.7
+        description: Release tag, for example v0.0.8
         required: true
-        default: v0.0.7
+        default: v0.0.8
   push:
     tags:
       - "v*"
@@ -44,7 +44,7 @@ jobs:
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Run tests and static checks
-        run: gradle --no-daemon --max-workers=1 test lintRelease
+        run: gradle --no-daemon --max-workers=1 :archive-core:test test lintRelease
 
       - name: Restore release keystore
         env:
@@ -120,7 +120,7 @@ jobs:
           - Version: ${BETTERPAK_RELEASE_TAG}
           - Commit: ${GITHUB_SHA}
           - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-          - Test and lint command: gradle --no-daemon --max-workers=1 test lintRelease
+          - Test and lint command: gradle --no-daemon --max-workers=1 :archive-core:test test lintRelease
           - Android build command: gradle --no-daemon --max-workers=1 assembleRelease
           - Signing certificate SHA-256: ${BETTERPAK_CERTIFICATE_SHA256}
 

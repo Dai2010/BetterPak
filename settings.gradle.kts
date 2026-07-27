@@ -18,3 +18,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "BetterPak"
 include(":app")
+include(":archive-core")

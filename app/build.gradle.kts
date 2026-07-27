@@ -25,8 +25,8 @@ android {
         applicationId = "com.dai2010.betterpak"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.0.7"
+        versionCode = 8
+        versionName = "0.0.8"
     }
 
     splits {
@@ -93,6 +93,8 @@ gradle.taskGraph.whenReady {
 }
 
 dependencies {
+    implementation(project(":archive-core"))
+
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)
     androidTestImplementation(composeBom)
