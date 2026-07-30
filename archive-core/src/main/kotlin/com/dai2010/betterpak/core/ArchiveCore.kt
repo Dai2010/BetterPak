@@ -334,20 +334,25 @@ class ZipArchiveCore(
         path: String,
         maxBytes: Long,
         limits: ArchiveLimits = defaultLimits,
+        isCancelled: () -> Boolean = { false },
+        onProgress: (ArchiveProgress) -> Unit = {},
     ): ByteArray = withArchiveErrors {
         require(maxBytes > 0L) { "读取上限必须大于 0" }
         require(maxBytes <= Int.MAX_VALUE) { "读取上限超过 JVM 数组限制" }
+        requireRegularFile(archive)
         val normalizedPath = safeEntryPath(path)
+        val listedEntry = list(archive, limits).firstOrNull { it.path == normalizedPath }
+            ?: throw ArchiveCoreException(
+                ArchiveErrorCode.INVALID_PATH,
+                "找不到归档条目：$normalizedPath",
+            )
+        if (listedEntry.isDirectory) {
+            throw ArchiveCoreException(ArchiveErrorCode.INVALID_PATH, "目录不能作为文件读取")
+        }
+        if (listedEntry.size > maxBytes) {
+            throw ArchiveCoreException(ArchiveErrorCode.LIMIT_EXCEEDED, "条目读取大小超过限制")
+        }
         ZipFile(archive.toFile()).use { zipFile ->
-            val listedEntries = list(archive, limits)
-            val listedEntry = listedEntries.firstOrNull { it.path == normalizedPath }
-                ?: throw ArchiveCoreException(
-                    ArchiveErrorCode.INVALID_PATH,
-                    "找不到归档条目：$normalizedPath",
-                )
-            if (listedEntry.isDirectory) {
-                throw ArchiveCoreException(ArchiveErrorCode.INVALID_PATH, "目录不能作为文件读取")
-            }
             val zipEntry = zipFile.getEntry(normalizedPath)
                 ?: throw ArchiveCoreException(ArchiveErrorCode.CORRUPT_ARCHIVE, "找不到归档条目：$normalizedPath")
             BufferedInputStream(zipFile.getInputStream(zipEntry)).use { input ->
@@ -355,12 +360,29 @@ class ZipArchiveCore(
                 val buffer = ByteArray(BUFFER_SIZE)
                 var readBytes = 0L
                 while (true) {
+                    checkCancelled(isCancelled)
                     val read = input.read(buffer)
                     if (read < 0) break
                     if (read == 0) continue
                     readBytes = checkedAdd(readBytes, read.toLong(), maxBytes)
                     output.write(buffer, 0, read)
+                    onProgress(
+                        ArchiveProgress(
+                            processedEntries = 0,
+                            totalEntries = 1,
+                            processedBytes = readBytes,
+                            totalBytes = listedEntry.size.takeIf { it >= 0L } ?: 0L,
+                        ),
+                    )
                 }
+                onProgress(
+                    ArchiveProgress(
+                        processedEntries = 1,
+                        totalEntries = 1,
+                        processedBytes = readBytes,
+                        totalBytes = listedEntry.size.takeIf { it >= 0L } ?: readBytes,
+                    ),
+                )
                 output.toByteArray()
             }
         }
@@ -444,6 +466,8 @@ class ZipArchiveCore(
     ): StagedTarget? {
         val output = resolveSafe(destination, path)
         val staged = resolveSafe(stagingDirectory, path)
+        ensureNoSymbolicLinks(destination, path)
+        ensureOutputParentsAreDirectories(destination, path)
         if (isDirectory) {
             if (Files.exists(output, LinkOption.NOFOLLOW_LINKS) && !Files.isDirectory(output, LinkOption.NOFOLLOW_LINKS)) {
                 throw ArchiveCoreException(ArchiveErrorCode.OUTPUT_CONFLICT, "文件阻挡目录输出：$path")
@@ -458,7 +482,10 @@ class ZipArchiveCore(
                 ArchiveOverwritePolicy.SKIP -> return null
                 ArchiveOverwritePolicy.RENAME -> {
                     val renamed = uniqueOutputPath(output)
-                    return StagedTarget(resolveSafe(stagingDirectory, destination.relativize(renamed).toString()))
+                    val renamedPath = destination.relativize(renamed).toString()
+                    ensureNoSymbolicLinks(destination, renamedPath)
+                    ensureOutputParentsAreDirectories(destination, renamedPath)
+                    return StagedTarget(resolveSafe(stagingDirectory, renamedPath))
                 }
                 ArchiveOverwritePolicy.REPLACE -> Unit
             }
@@ -566,6 +593,9 @@ class ZipArchiveCore(
     }
 
     private fun requireDirectory(path: Path) {
+        if (Files.isSymbolicLink(path)) {
+            throw ArchiveCoreException(ArchiveErrorCode.INVALID_PATH, "目标目录不能是符号链接：$path")
+        }
         if (!path.isDirectoryWithoutFollowingLinks()) {
             throw ArchiveCoreException(ArchiveErrorCode.PERMISSION_DENIED, "目标路径不是目录：$path")
         }
@@ -648,6 +678,32 @@ class ZipArchiveCore(
                 }
             },
         )
+    }
+
+    private fun ensureNoSymbolicLinks(root: Path, relativePath: String) {
+        var current = root
+        if (Files.isSymbolicLink(current)) {
+            throw ArchiveCoreException(ArchiveErrorCode.INVALID_PATH, "目标路径包含符号链接：$root")
+        }
+        ArchivePath.normalize(relativePath).orEmpty().split('/').forEach { part ->
+            current = current.resolve(part)
+            if (Files.isSymbolicLink(current)) {
+                throw ArchiveCoreException(ArchiveErrorCode.INVALID_PATH, "目标路径包含符号链接：$relativePath")
+            }
+        }
+    }
+
+    private fun ensureOutputParentsAreDirectories(root: Path, relativePath: String) {
+        var current = root
+        val parts = ArchivePath.normalize(relativePath).orEmpty().split('/')
+        parts.dropLast(1).forEach { part ->
+            current = current.resolve(part)
+            if (Files.exists(current, LinkOption.NOFOLLOW_LINKS) &&
+                !Files.isDirectory(current, LinkOption.NOFOLLOW_LINKS)
+            ) {
+                throw ArchiveCoreException(ArchiveErrorCode.OUTPUT_CONFLICT, "文件阻挡目录输出：$relativePath")
+            }
+        }
     }
 
     private fun <T> withArchiveErrors(block: () -> T): T {

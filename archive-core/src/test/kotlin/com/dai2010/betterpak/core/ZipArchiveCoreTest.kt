@@ -105,6 +105,75 @@ class ZipArchiveCoreTest {
         assertFalse(Files.exists(destination.resolve("media.bin")))
     }
 
+    @Test
+    fun readEntryHonorsLimitCancellationAndProgress() = withTemporaryDirectory { root ->
+        val archive = root.resolve("read.zip")
+        writeZip(archive, "notes.txt" to "read me")
+        val progress = mutableListOf<ArchiveProgress>()
+        val engine = ZipArchiveCore()
+
+        val bytes = engine.readEntry(
+            archive = archive,
+            path = "notes.txt",
+            maxBytes = 64,
+            onProgress = progress::add,
+        )
+
+        assertArrayEquals("read me".toByteArray(), bytes)
+        assertTrue(progress.isNotEmpty())
+        assertEquals(1, progress.last().processedEntries)
+        assertEquals(bytes.size.toLong(), progress.last().processedBytes)
+
+        val cancelled = runCatching {
+            engine.readEntry(archive, "notes.txt", 64, isCancelled = { true })
+        }.exceptionOrNull()
+        assertTrue(cancelled is ArchiveCoreException)
+        assertEquals(ArchiveErrorCode.CANCELLED, (cancelled as ArchiveCoreException).code)
+
+        val limited = runCatching { engine.readEntry(archive, "notes.txt", 2) }.exceptionOrNull()
+        assertTrue(limited is ArchiveCoreException)
+        assertEquals(ArchiveErrorCode.LIMIT_EXCEEDED, (limited as ArchiveCoreException).code)
+    }
+
+    @Test
+    fun rejectsEntryCountDuplicatesAndUnsafeOutputParents() = withTemporaryDirectory { root ->
+        val tooManyEntries = root.resolve("too-many.zip")
+        writeZip(tooManyEntries, "nested/file.txt" to "1", "two.txt" to "2")
+        val tooMany = runCatching {
+            ZipArchiveCore(ArchiveLimits(maxEntries = 1)).list(tooManyEntries)
+        }.exceptionOrNull()
+        assertTrue(tooMany is ArchiveCoreException)
+        assertEquals(ArchiveErrorCode.LIMIT_EXCEEDED, (tooMany as ArchiveCoreException).code)
+
+        val duplicate = root.resolve("duplicate.zip")
+        writeZip(duplicate, "same.txt" to "first", "./same.txt" to "second")
+        val duplicateError = runCatching { ZipArchiveCore().list(duplicate) }.exceptionOrNull()
+        assertTrue(duplicateError is ArchiveCoreException)
+        assertEquals(ArchiveErrorCode.DUPLICATE_ENTRY, (duplicateError as ArchiveCoreException).code)
+
+        val destination = Files.createDirectories(root.resolve("destination"))
+        Files.writeString(destination.resolve("nested"), "blocking file")
+        val parentConflict = runCatching { ZipArchiveCore().extract(tooManyEntries, destination) }.exceptionOrNull()
+        assertTrue(parentConflict is ArchiveCoreException)
+        assertEquals(ArchiveErrorCode.OUTPUT_CONFLICT, (parentConflict as ArchiveCoreException).code)
+        assertEquals("blocking file", Files.readString(destination.resolve("nested")))
+    }
+
+    @Test
+    fun rejectsSymbolicLinksInExtractionDestination() = withTemporaryDirectory { root ->
+        val archive = root.resolve("link.zip")
+        writeZip(archive, "redirect/file.txt" to "blocked")
+        val destination = Files.createDirectories(root.resolve("destination"))
+        val outside = Files.createDirectories(root.resolve("outside"))
+        Files.createSymbolicLink(destination.resolve("redirect"), outside)
+
+        val error = runCatching { ZipArchiveCore().extract(archive, destination) }.exceptionOrNull()
+
+        assertTrue(error is ArchiveCoreException)
+        assertEquals(ArchiveErrorCode.INVALID_PATH, (error as ArchiveCoreException).code)
+        assertFalse(Files.exists(outside.resolve("file.txt")))
+    }
+
     private fun writeZip(archive: Path, vararg entries: Pair<String, String>) {
         ZipOutputStream(Files.newOutputStream(archive)).use { output ->
             entries.forEach { (name, content) ->
