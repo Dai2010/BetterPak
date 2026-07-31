@@ -7,6 +7,11 @@ import android.os.Environment
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import androidx.documentfile.provider.DocumentFile
+import com.dai2010.betterpak.core.ArchiveCoreException
+import com.dai2010.betterpak.core.ArchiveErrorCode as CoreArchiveErrorCode
+import com.dai2010.betterpak.core.ArchiveLimits
+import com.dai2010.betterpak.core.ZipArchiveCore
+import com.dai2010.betterpak.core.ZipCompression
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
@@ -31,11 +36,14 @@ import com.github.junrar.Archive
 import com.github.luben.zstd.ZstdOutputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.channels.Channel
 import org.apache.commons.compress.archivers.sevenz.SevenZMethod
 import org.apache.commons.compress.archivers.sevenz.SevenZMethodConfiguration
 import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
@@ -49,10 +57,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.nio.charset.Charset
 import java.util.UUID
-import java.util.zip.CRC32
-import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
-import java.util.zip.ZipOutputStream
 import kotlin.coroutines.coroutineContext
 
 object ArchiveRepository : ArchiveEngine {
@@ -232,49 +237,24 @@ object ArchiveRepository : ArchiveEngine {
             val outputFile = File(tempDirectory, "archive.zip")
             try {
                 val stagedInputs = stageInputs(context, inputUris, tempDirectory, options.threads)
-                val totalBytes = stagedInputs.sumOf { if (it.file.isFile) it.file.length() else 0L }
-                var processedEntries = 0
-                var processedBytes = 0L
-                ZipOutputStream(outputFile.outputStream().buffered()).use { archive ->
-                    archive.setLevel(options.compressionLevel.coerceIn(0, 9))
-                    stagedInputs.forEach { staged ->
-                        coroutineContext.ensureActive()
-                        val entry = ZipEntry(staged.entryName)
-                        if (staged.file.isDirectory) {
-                            entry.method = ZipEntry.STORED
-                            entry.size = 0L
-                            entry.compressedSize = 0L
-                            entry.crc = 0L
-                        } else if (options.algorithm == CompressionAlgorithm.COPY) {
-                            val checksum = crc32(staged.file)
-                            entry.method = ZipEntry.STORED
-                            entry.size = staged.file.length()
-                            entry.compressedSize = staged.file.length()
-                            entry.crc = checksum.value
-                        }
-                        archive.putNextEntry(entry)
-                        if (staged.file.isFile) {
-                            staged.file.inputStream().use { input ->
-                                processedBytes += copyWithProgress(
-                                    input,
-                                    archive,
-                                    totalBytes,
-                                    processedBytes,
-                                    onProgress,
-                                )
-                            }
-                        }
-                        archive.closeEntry()
-                        processedEntries++
-                        onProgress(
-                            ArchiveProgress(
-                                processedEntries = processedEntries,
-                                totalEntries = stagedInputs.size,
-                                processedBytes = processedBytes,
-                                totalBytes = totalBytes,
-                            ),
-                        )
-                    }
+                val stagedRoots = stagedInputs
+                    .filter { staged -> staged.entryName == staged.file.name }
+                    .map { staged -> staged.file }
+                require(stagedRoots.isNotEmpty()) { "没有可归档的输入内容" }
+                runCoreWithProgress(onProgress) { isCancelled, progress ->
+                    ZipArchiveCore().create(
+                        inputs = stagedRoots,
+                        output = outputFile.toPath(),
+                        compressionLevel = options.compressionLevel.coerceIn(0, 9),
+                        compression = if (options.algorithm == CompressionAlgorithm.COPY) {
+                            ZipCompression.STORE
+                        } else {
+                            ZipCompression.DEFLATE
+                        },
+                        limits = ArchiveLimits(maxEntries = MAX_LIST_ENTRIES),
+                        isCancelled = isCancelled,
+                        onProgress = progress,
+                    )
                 }
                 copyFileToUri(context, outputFile, outputUri, onProgress)
                 stagedInputs.count { it.file.isFile }
@@ -614,25 +594,17 @@ object ArchiveRepository : ArchiveEngine {
     }
 
     private suspend fun listZip(source: File): List<ArchiveItem> {
-        ZipFile(source).use { archive ->
-            val items = mutableListOf<ArchiveItem>()
-            val entries = archive.entries()
-            while (entries.hasMoreElements()) {
-                coroutineContext.ensureActive()
-                if (items.size >= MAX_LIST_ENTRIES) error("压缩包文件数量超过限制")
-                val entry = entries.nextElement()
-                val path = ArchivePath.normalize(entry.name)
-                    ?: error("归档包含不安全路径：${entry.name}")
-                items += ArchiveItem(
-                    path = path,
+        return ZipArchiveCore()
+            .list(source.toPath(), ArchiveLimits(maxEntries = MAX_LIST_ENTRIES))
+            .map { entry ->
+                ArchiveItem(
+                    path = entry.path,
                     size = entry.size,
                     compressedSize = entry.compressedSize,
-                    modifiedTime = entry.time.takeIf { it >= 0L },
+                    modifiedTime = entry.modifiedTimeMillis,
                     isDirectory = entry.isDirectory,
                 )
             }
-            return items
-        }
     }
 
     private suspend fun listSevenZ(source: File, password: String): List<ArchiveItem> {
@@ -749,37 +721,113 @@ object ArchiveRepository : ArchiveEngine {
         options: ArchiveExtractOptions,
         onProgress: suspend (ArchiveProgress) -> Unit,
     ): Int {
+        val temporaryDirectory = File(context.cacheDir, "betterpak-zip-extract-${System.nanoTime()}")
+            .apply { mkdirs() }
+        val temporaryOutput = File(temporaryDirectory, "output").apply { mkdirs() }
+        try {
+            runCoreWithProgress(onProgress) { isCancelled, progress ->
+                ZipArchiveCore().extract(
+                    archive = source.toPath(),
+                    destination = temporaryOutput.toPath(),
+                    selectedPaths = selectedPaths,
+                    limits = ArchiveLimits(
+                        maxEntries = options.maxEntries,
+                        maxExpandedBytes = options.maxExpandedBytes,
+                    ),
+                    isCancelled = isCancelled,
+                    onProgress = progress,
+                )
+            }
+            return copyExtractedTree(
+                context = context,
+                source = temporaryOutput,
+                destination = root,
+                overwritePolicy = options.overwritePolicy,
+                maxBytes = options.maxExpandedBytes,
+                onProgress = onProgress,
+            )
+        } finally {
+            temporaryDirectory.deleteRecursively()
+        }
+    }
+
+    private suspend fun copyExtractedTree(
+        context: Context,
+        source: File,
+        destination: DocumentFile,
+        overwritePolicy: OverwritePolicy,
+        maxBytes: Long,
+        onProgress: suspend (ArchiveProgress) -> Unit,
+    ): Int {
+        val files = source.walkTopDown().filter { it.isFile }.toList()
+        val totalBytes = files.sumOf { it.length() }
+        var processedEntries = 0
+        var processedBytes = 0L
         var extracted = 0
-        var seenEntries = 0
-        var expandedBytes = 0L
-        ZipFile(source).use { archive ->
-            val entries = archive.entries()
-            while (entries.hasMoreElements()) {
-                coroutineContext.ensureActive()
-                if (++seenEntries > options.maxEntries) error("压缩包文件数量超过限制")
-                val entry = entries.nextElement()
-                val path = ArchivePath.normalize(entry.name)
-                    ?: error("归档包含不安全路径：${entry.name}")
-                if (isSelected(path, selectedPaths)) {
-                    if (entry.isDirectory) {
-                        ensureDirectory(root, path)
-                    } else {
-                        val output = createOutputFile(root, path, options.overwritePolicy)
-                        if (output != null) {
-                            val copied = writeEntry(context, output) { stream ->
-                                archive.getInputStream(entry).use { input ->
-                                    copyWithLimit(input, stream, expandedBytes, options.maxExpandedBytes)
-                                }
-                            }
-                            expandedBytes = checkedExpandedBytes(expandedBytes, copied, options)
-                            extracted++
+
+        suspend fun copyNode(node: File, relativePath: String) {
+            coroutineContext.ensureActive()
+            if (node.isDirectory) {
+                ensureDirectory(destination, relativePath)
+                node.listFiles().orEmpty().forEach { child ->
+                    copyNode(child, "$relativePath/${child.name}")
+                }
+                return
+            }
+
+            val output = createOutputFile(destination, relativePath, overwritePolicy)
+            if (output != null) {
+                val copied = writeEntry(context, output) { stream ->
+                    node.inputStream().use { input ->
+                        copyWithProgress(
+                            input = input,
+                            output = stream,
+                            totalBytes = totalBytes,
+                            initialBytes = processedBytes,
+                        ) { progress ->
+                            processedBytes = progress.processedBytes
+                            onProgress(
+                                ArchiveProgress(
+                                    processedEntries,
+                                    files.size,
+                                    processedBytes,
+                                    totalBytes,
+                                ),
+                            )
                         }
                     }
                 }
-                onProgress(ArchiveProgress(seenEntries, 0, expandedBytes, -1L))
+                require(copied <= maxBytes) { "压缩包展开大小超过限制" }
+                extracted++
+            }
+            processedEntries++
+            onProgress(ArchiveProgress(processedEntries, files.size, processedBytes, totalBytes))
+        }
+
+        source.listFiles().orEmpty().forEach { child -> copyNode(child, child.name) }
+        return extracted
+    }
+
+    private suspend fun <T> runCoreWithProgress(
+        onProgress: suspend (ArchiveProgress) -> Unit,
+        operation: (isCancelled: () -> Boolean, onProgress: (ArchiveProgress) -> Unit) -> T,
+    ): T = coroutineScope {
+        val parentJob = checkNotNull(coroutineContext[Job])
+        val progressChannel = Channel<ArchiveProgress>(Channel.CONFLATED)
+        val reporter = launch {
+            for (progress in progressChannel) {
+                onProgress(progress)
             }
         }
-        return extracted
+        try {
+            operation(
+                { !parentJob.isActive },
+                { progress -> progressChannel.trySend(progress) },
+            )
+        } finally {
+            progressChannel.close()
+            reporter.join()
+        }
     }
 
     private suspend fun extractSevenZ(
@@ -1034,25 +1082,15 @@ object ArchiveRepository : ArchiveEngine {
     }
 
     private suspend fun readZipEntry(source: File, path: String, maxBytes: Long): ByteArray? {
-        ZipFile(source).use { archive ->
-            val entry = archive.entries().asSequence().firstOrNull {
-                ArchivePath.normalize(it.name) == path
-            } ?: return null
-            return archive.getInputStream(entry).use { readPreviewBytes(it, maxBytes) }
-        }
-    }
-
-    private fun crc32(file: File): CRC32 {
-        val checksum = CRC32()
-        file.inputStream().use { input ->
-            val buffer = ByteArray(BUFFER_SIZE)
-            while (true) {
-                val read = input.read(buffer)
-                if (read <= 0) break
-                checksum.update(buffer, 0, read)
-            }
-        }
-        return checksum
+        return ZipArchiveCore().readEntry(
+            archive = source.toPath(),
+            path = path,
+            maxBytes = maxBytes,
+            limits = ArchiveLimits(
+                maxEntries = MAX_LIST_ENTRIES,
+                maxExpandedBytes = maxBytes,
+            ),
+        )
     }
 
     private suspend fun readSevenZEntry(source: File, path: String, password: String, maxBytes: Long): ByteArray? {
@@ -1535,8 +1573,27 @@ object ArchiveRepository : ArchiveEngine {
         Result.success(block())
     } catch (error: CancellationException) {
         throw error
+    } catch (error: ArchiveCoreException) {
+        Result.failure(
+            ArchiveOperationException(
+                code = mapCoreErrorCode(error.code),
+                message = error.message ?: "归档操作失败",
+                cause = error,
+            ),
+        )
     } catch (error: Throwable) {
         Result.failure(ArchiveErrorClassifier.wrap(error))
+    }
+
+    private fun mapCoreErrorCode(code: CoreArchiveErrorCode): ArchiveErrorCode = when (code) {
+        CoreArchiveErrorCode.INVALID_PATH -> ArchiveErrorCode.INVALID_PATH
+        CoreArchiveErrorCode.LIMIT_EXCEEDED -> ArchiveErrorCode.LIMIT_EXCEEDED
+        CoreArchiveErrorCode.DUPLICATE_ENTRY,
+        CoreArchiveErrorCode.CORRUPT_ARCHIVE,
+        -> ArchiveErrorCode.CORRUPT_ARCHIVE
+        CoreArchiveErrorCode.OUTPUT_CONFLICT -> ArchiveErrorCode.OUTPUT_CONFLICT
+        CoreArchiveErrorCode.PERMISSION_DENIED -> ArchiveErrorCode.PERMISSION_REVOKED
+        CoreArchiveErrorCode.CANCELLED -> ArchiveErrorCode.CANCELLED
     }
 
     private data class TargetFile(

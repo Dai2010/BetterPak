@@ -12,6 +12,7 @@
 - PDF、DOC/DOCX、XLS/XLSX、PPT/PPTX、ODF 文档不在 APK 内置办公套件；BetterPak 不执行宏、脚本或嵌套归档，没有外部处理器时仍可选择安全解压。
 - 归档引擎通过领域 `ArchiveEngine` 边界提供识别、列表、预览、创建、解压、取消和进度；非法 ZIP/RAR/7z/TAR 路径不再静默跳过，错误会分类为安全、限制、权限、密码或损坏等类型。
 - `v0.0.9` 延续独立的 Kotlin/JVM `archive-core`；ZIP 核心提供路径安全、列表、创建、事务式解压、单条目读取、取消和限制测试，RAR/7z/TAR/Zstandard 与 Android SAF 适配仍按 `NEXT_PLAN.md` 分阶段迁移。
+- 当前未发布的 `v0.0.10` 工作树已将 Android ZIP 列表、创建、解压和受限预览接到 `archive-core`；SAF `Uri` 仍只在 Android 适配层转换为临时本地文件，ZIP 核心错误会映射回 Android 领域错误。该工作尚未递增版本号或宣称桌面支持，记录见 [v0.0.10 核心迁移](docs/v0.0.10-archive-core-migration.md)。
 - 创建和完整解压会保存来源 URI、目标 URI、格式、状态、错误类型、进度摘要和时间，主页通过 ViewModel 观察任务；密码不进入任务记录、设置、日志或通知。
 - 设置页可保存最大条目数、最大展开体积、最大预览大小和覆盖策略；默认限制仍为 100000 条目、50 GiB 展开体积和 8 MiB 预览。
 - v0.0.8 移除 OneDrive/Google Drive 云盘入口、OAuth、Token 存储和网络 provider，避免发布无法完成登录配置的功能；原因和范围见 [v0.0.8 更新说明](docs/v0.0.8-release-notes.md)。
@@ -20,7 +21,7 @@
 
 Release workflow 在远程使用 GitHub Secrets 中的 PKCS#12 发布密钥签名 APK，不把密钥写入仓库。所以不要尝试在仓库里找密钥。
 
-详细的 v0.0.5 格式验收、v0.0.6 实现记录、v0.0.8/v0.0.9 更新说明、`archive-core` Spike、依赖审计和签名流程见 [格式验收](docs/v0.0.5-format-acceptance.md)、[v0.0.6 实现记录](docs/v0.0.6-implementation.md)、[v0.0.8 更新说明](docs/v0.0.8-release-notes.md)、[v0.0.9 更新说明](docs/v0.0.9-release-notes.md)、[v0.0.8 `archive-core` Spike](docs/v0.0.8-archive-core-spike.md) 和 [依赖审计](docs/dependency-audit-v0.0.5.md)；当前执行顺序以工作区根目录的 `NEXT_PLAN.md` 为准。
+详细的 v0.0.5 格式验收、v0.0.6 实现记录、v0.0.8/v0.0.9 更新说明、`archive-core` Spike、v0.0.10 核心迁移、依赖审计和签名流程见 [格式验收](docs/v0.0.5-format-acceptance.md)、[v0.0.6 实现记录](docs/v0.0.6-implementation.md)、[v0.0.8 更新说明](docs/v0.0.8-release-notes.md)、[v0.0.9 更新说明](docs/v0.0.9-release-notes.md)、[v0.0.8 `archive-core` Spike](docs/v0.0.8-archive-core-spike.md)、[v0.0.10 核心迁移](docs/v0.0.10-archive-core-migration.md) 和 [依赖审计](docs/dependency-audit-v0.0.5.md)；当前执行顺序以工作区根目录的 `NEXT_PLAN.md` 为准。
 
 ## v0.0.8 更新说明
 

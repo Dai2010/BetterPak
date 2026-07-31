@@ -2,8 +2,8 @@ package com.dai2010.betterpak.core
 
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
 import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -38,6 +38,25 @@ class ZipArchiveCoreTest {
             byteArrayOf(),
             Files.readAllBytes(destination.resolve("输入资料/空文件.bin")),
         )
+    }
+
+    @Test
+    fun createsStoredZipEntriesWithoutDeflateData() = withTemporaryDirectory { root ->
+        val input = root.resolve("payload.txt")
+        Files.writeString(input, "stored content")
+        val archive = root.resolve("stored.zip")
+
+        ZipArchiveCore().create(
+            inputs = listOf(input),
+            output = archive,
+            compression = ZipCompression.STORE,
+        )
+
+        ZipFile(archive.toFile()).use { zipFile ->
+            val entry = zipFile.getEntry("payload.txt")
+            assertEquals(ZipEntry.STORED, entry.method)
+            assertEquals(entry.size, entry.compressedSize)
+        }
     }
 
     @Test
@@ -133,6 +152,36 @@ class ZipArchiveCoreTest {
         val limited = runCatching { engine.readEntry(archive, "notes.txt", 2) }.exceptionOrNull()
         assertTrue(limited is ArchiveCoreException)
         assertEquals(ArchiveErrorCode.LIMIT_EXCEEDED, (limited as ArchiveCoreException).code)
+    }
+
+    @Test
+    fun readEntryHonorsCoreExpandedLimitEvenWhenReadLimitIsLarger() = withTemporaryDirectory { root ->
+        val archive = root.resolve("bounded-read.zip")
+        writeZip(archive, "notes.txt" to "read me")
+
+        val error = runCatching {
+            ZipArchiveCore(ArchiveLimits(maxExpandedBytes = 2)).readEntry(
+                archive = archive,
+                path = "notes.txt",
+                maxBytes = 64,
+            )
+        }.exceptionOrNull()
+
+        assertTrue(error is ArchiveCoreException)
+        assertEquals(ArchiveErrorCode.LIMIT_EXCEEDED, (error as ArchiveCoreException).code)
+    }
+
+    @Test
+    fun classifiesTruncatedZipAsCorruptArchive() = withTemporaryDirectory { root ->
+        val archive = root.resolve("truncated.zip")
+        writeZip(archive, "notes.txt" to "content")
+        val bytes = Files.readAllBytes(archive)
+        Files.write(archive, bytes.copyOf(bytes.size - 4))
+
+        val error = runCatching { ZipArchiveCore().list(archive) }.exceptionOrNull()
+
+        assertTrue(error is ArchiveCoreException)
+        assertEquals(ArchiveErrorCode.CORRUPT_ARCHIVE, (error as ArchiveCoreException).code)
     }
 
     @Test

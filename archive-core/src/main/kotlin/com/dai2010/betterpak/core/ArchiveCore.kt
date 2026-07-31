@@ -15,6 +15,7 @@ import java.nio.file.StandardOpenOption
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.UUID
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipException
 import java.util.zip.ZipFile
@@ -49,6 +50,11 @@ enum class ArchiveOverwritePolicy {
     REPLACE,
     SKIP,
     RENAME,
+}
+
+enum class ZipCompression {
+    DEFLATE,
+    STORE,
 }
 
 enum class ArchiveErrorCode {
@@ -112,6 +118,12 @@ class ZipArchiveCore(
             while (enumeration.hasMoreElements()) {
                 val entry = enumeration.nextElement()
                 checkEntryCount(entries.size + 1, limits)
+                if (entry.size < -1L || entry.compressedSize < -1L) {
+                    throw ArchiveCoreException(
+                        ArchiveErrorCode.CORRUPT_ARCHIVE,
+                        "归档条目包含无效大小：${entry.name}",
+                    )
+                }
                 val path = safeEntryPath(entry.name)
                 if (!paths.add(path)) {
                     throw ArchiveCoreException(
@@ -137,6 +149,7 @@ class ZipArchiveCore(
         inputs: List<Path>,
         output: Path,
         compressionLevel: Int = 6,
+        compression: ZipCompression = ZipCompression.DEFLATE,
         limits: ArchiveLimits = defaultLimits,
         isCancelled: () -> Boolean = { false },
         onProgress: (ArchiveProgress) -> Unit = {},
@@ -175,6 +188,12 @@ class ZipArchiveCore(
                     }
                     val zipEntry = ZipEntry(entryName).apply {
                         inputEntry.pathOnDisk.lastModifiedTimeMillis()?.let { time = it }
+                        if (compression == ZipCompression.STORE) {
+                            method = ZipEntry.STORED
+                            size = if (inputEntry.isDirectory) 0L else inputEntry.pathOnDisk.fileSize()
+                            compressedSize = size
+                            crc = if (inputEntry.isDirectory) 0L else crc32(inputEntry.pathOnDisk)
+                        }
                     }
                     zipOutput.putNextEntry(zipEntry)
                     if (!inputEntry.isDirectory) {
@@ -341,6 +360,7 @@ class ZipArchiveCore(
         require(maxBytes <= Int.MAX_VALUE) { "读取上限超过 JVM 数组限制" }
         requireRegularFile(archive)
         val normalizedPath = safeEntryPath(path)
+        val effectiveMaxBytes = minOf(maxBytes, limits.maxExpandedBytes)
         val listedEntry = list(archive, limits).firstOrNull { it.path == normalizedPath }
             ?: throw ArchiveCoreException(
                 ArchiveErrorCode.INVALID_PATH,
@@ -349,7 +369,7 @@ class ZipArchiveCore(
         if (listedEntry.isDirectory) {
             throw ArchiveCoreException(ArchiveErrorCode.INVALID_PATH, "目录不能作为文件读取")
         }
-        if (listedEntry.size > maxBytes) {
+        if (listedEntry.size > effectiveMaxBytes) {
             throw ArchiveCoreException(ArchiveErrorCode.LIMIT_EXCEEDED, "条目读取大小超过限制")
         }
         ZipFile(archive.toFile()).use { zipFile ->
@@ -364,7 +384,7 @@ class ZipArchiveCore(
                     val read = input.read(buffer)
                     if (read < 0) break
                     if (read == 0) continue
-                    readBytes = checkedAdd(readBytes, read.toLong(), maxBytes)
+                    readBytes = checkedAdd(readBytes, read.toLong(), effectiveMaxBytes)
                     output.write(buffer, 0, read)
                     onProgress(
                         ArchiveProgress(
@@ -716,8 +736,45 @@ class ZipArchiveCore(
         } catch (error: SecurityException) {
             throw ArchiveCoreException(ArchiveErrorCode.PERMISSION_DENIED, "没有访问归档路径的权限", error)
         } catch (error: IOException) {
-            throw ArchiveCoreException(ArchiveErrorCode.PERMISSION_DENIED, error.message ?: "归档文件操作失败", error)
+            val code = if (isCorruptArchiveError(error)) {
+                ArchiveErrorCode.CORRUPT_ARCHIVE
+            } else {
+                ArchiveErrorCode.PERMISSION_DENIED
+            }
+            throw ArchiveCoreException(code, error.message ?: "归档文件操作失败", error)
         }
+    }
+
+    private fun isCorruptArchiveError(error: Throwable): Boolean {
+        var current: Throwable? = error
+        while (current != null) {
+            val message = current.message.orEmpty().lowercase()
+            if (
+                "crc" in message ||
+                "central directory" in message ||
+                "end of central" in message ||
+                "zip file" in message ||
+                "unexpected end" in message
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
+    }
+
+    private fun crc32(file: Path): Long {
+        val checksum = CRC32()
+        BufferedInputStream(Files.newInputStream(file)).use { input ->
+            val buffer = ByteArray(BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (read == 0) continue
+                checksum.update(buffer, 0, read)
+            }
+        }
+        return checksum.value
     }
 
     private data class InputEntry(
