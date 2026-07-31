@@ -10,6 +10,7 @@ import androidx.documentfile.provider.DocumentFile
 import com.dai2010.betterpak.core.ArchiveCoreException
 import com.dai2010.betterpak.core.ArchiveErrorCode as CoreArchiveErrorCode
 import com.dai2010.betterpak.core.ArchiveLimits
+import com.dai2010.betterpak.core.ArchiveProgress as CoreArchiveProgress
 import com.dai2010.betterpak.core.ZipArchiveCore
 import com.dai2010.betterpak.core.ZipCompression
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
@@ -239,7 +240,7 @@ object ArchiveRepository : ArchiveEngine {
                 val stagedInputs = stageInputs(context, inputUris, tempDirectory, options.threads)
                 val stagedRoots = stagedInputs
                     .filter { staged -> staged.entryName == staged.file.name }
-                    .map { staged -> staged.file }
+                    .map { staged -> staged.file.toPath() }
                 require(stagedRoots.isNotEmpty()) { "没有可归档的输入内容" }
                 runCoreWithProgress(onProgress) { isCancelled, progress ->
                     ZipArchiveCore().create(
@@ -810,13 +811,20 @@ object ArchiveRepository : ArchiveEngine {
 
     private suspend fun <T> runCoreWithProgress(
         onProgress: suspend (ArchiveProgress) -> Unit,
-        operation: (isCancelled: () -> Boolean, onProgress: (ArchiveProgress) -> Unit) -> T,
+        operation: (isCancelled: () -> Boolean, onProgress: (CoreArchiveProgress) -> Unit) -> T,
     ): T = coroutineScope {
         val parentJob = checkNotNull(coroutineContext[Job])
-        val progressChannel = Channel<ArchiveProgress>(Channel.CONFLATED)
+        val progressChannel = Channel<CoreArchiveProgress>(Channel.CONFLATED)
         val reporter = launch {
             for (progress in progressChannel) {
-                onProgress(progress)
+                onProgress(
+                    ArchiveProgress(
+                        processedEntries = progress.processedEntries,
+                        totalEntries = progress.totalEntries,
+                        processedBytes = progress.processedBytes,
+                        totalBytes = progress.totalBytes,
+                    ),
+                )
             }
         }
         try {
