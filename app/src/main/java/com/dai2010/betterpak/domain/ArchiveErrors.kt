@@ -27,7 +27,8 @@ class ArchiveOperationException(
 object ArchiveErrorClassifier {
     fun wrap(error: Throwable): Throwable {
         if (error is ArchiveOperationException) return error
-        return ArchiveOperationException(classify(error), error.message ?: "归档操作失败", error)
+        val code = classify(error)
+        return ArchiveOperationException(code, userMessage(error, code), error)
     }
 
     fun classify(error: Throwable): ArchiveErrorCode {
@@ -46,6 +47,7 @@ object ArchiveErrorClassifier {
         val message = error.message.orEmpty().lowercase()
         return when {
             "路径" in message || "path" in message -> ArchiveErrorCode.INVALID_PATH
+            "invalid uri" in message || "无效 uri" in message -> ArchiveErrorCode.INVALID_PATH
             "超过限制" in message || "limit" in message -> ArchiveErrorCode.LIMIT_EXCEEDED
             "权限" in message || "permission" in message || "无法访问" in message -> ArchiveErrorCode.PERMISSION_REVOKED
             "空间" in message || "storage" in message || "no space" in message -> ArchiveErrorCode.INSUFFICIENT_STORAGE
@@ -71,5 +73,18 @@ object ArchiveErrorClassifier {
             }
         }
         else -> null
+    }
+
+    private fun userMessage(error: Throwable, code: ArchiveErrorCode): String {
+        val message = error.message.orEmpty()
+        return when {
+            code == ArchiveErrorCode.PERMISSION_REVOKED ->
+                "无法访问所选内容，文件可能已被删除或权限已撤销，请重新选择后重试"
+            code == ArchiveErrorCode.INSUFFICIENT_STORAGE ->
+                "临时存储空间不足，请清理空间后重试"
+            "invalid uri" in message.lowercase() || "无效 uri" in message.lowercase() ->
+                "所选内容不是有效的文件或目录，请重新选择后重试"
+            else -> message.ifBlank { "归档操作失败" }
+        }
     }
 }

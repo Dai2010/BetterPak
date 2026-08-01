@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag, for example v0.0.9-fix1
+        description: Release tag, for example v0.0.9-fix2
         required: true
-        default: v0.0.9-fix1
+        default: v0.0.9-fix2
+      change_summary:
+        description: "具体变更：SAF 单文件 URI 分流、目录兼容、中文错误提示和回归验证"
+        required: true
+        default: "v0.0.9-fix2：修复 SAF 单文件 /document URI 创建失败；保留 /tree 目录递归；补充中文错误提示和回归测试。"
   push:
     tags:
       - "v*"
@@ -19,6 +23,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       BETTERPAK_RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      BETTERPAK_CHANGE_SUMMARY: ${{ github.event.inputs.change_summary || 'v0.0.9-fix2：修复 SAF 单文件 /document URI 创建失败；保留 /tree 目录递归；补充中文错误提示和回归测试。' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,6 +42,16 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Validate release request
+        run: |
+          set -euo pipefail
+          version_name="$(sed -n 's/.*versionName = "\([^"]*\)"/\1/p' app/build.gradle.kts | head -n 1)"
+          test -n "$version_name"
+          test "${BETTERPAK_RELEASE_TAG#v}" = "$version_name"
+          test -n "$BETTERPAK_CHANGE_SUMMARY"
+          echo "Release tag: $BETTERPAK_RELEASE_TAG"
+          echo "Change summary: $BETTERPAK_CHANGE_SUMMARY"
 
       - name: Install Android SDK packages
         run: |
@@ -124,6 +139,18 @@ jobs:
           - Android build command: gradle --no-daemon --max-workers=1 assembleRelease
           - Signing certificate SHA-256: ${BETTERPAK_CERTIFICATE_SHA256}
 
+          ## Change summary
+
+          ${BETTERPAK_CHANGE_SUMMARY}
+
+          ## v0.0.9-fix2 change points
+
+          - Detects SAF URI type with DocumentsContract.isTreeUri().
+          - Uses fromTreeUri() only for directory trees and fromSingleUri() for single files.
+          - Copies both input types into application cache staging before ZIP, 7z, TAR or tar.zst creation.
+          - Reports revoked permissions, invalid URIs, empty documents and unreadable inputs with actionable Chinese messages.
+          - Does not add MANAGE_EXTERNAL_STORAGE.
+
           ## Artifacts
 
           | File | Bytes |
@@ -164,6 +191,18 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
           body: |
+            ## v0.0.9-fix2 变更点
+
+            - 按 `DocumentsContract.isTreeUri()` 分流 SAF URI：目录使用 `fromTreeUri()`，单文件使用 `fromSingleUri()`。
+            - 单文件通过 `ContentResolver.openInputStream()` 复制到应用临时 staging，修复 Downloads `/document/...` URI 的 `Invalid URI` 创建失败。
+            - ZIP、7z、TAR 和 TAR.Zstandard 共用该修复；目录递归、进度、取消和失败清理保持不变。
+            - 权限撤销、无效 URI、空文档和读取失败显示中文可操作提示；不新增 `MANAGE_EXTERNAL_STORAGE`。
+            - 本次提交包含 URI 错误和权限错误回归测试，workflow 已执行测试、Lint、四 ABI 签名校验和 SHA-256 产物检查。
+
+            ## Submitted change summary
+
+            ${{ github.event.inputs.change_summary || 'v0.0.9-fix2：修复 SAF 单文件 /document URI 创建失败；保留 /tree 目录递归；补充中文错误提示和回归测试。' }}
+
             Signing certificate SHA-256: `${{ env.BETTERPAK_CERTIFICATE_SHA256 }}`
           files: |
             app/build/outputs/release-archive/app-*-release.apk

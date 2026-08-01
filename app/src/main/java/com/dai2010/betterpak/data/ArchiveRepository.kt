@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import androidx.documentfile.provider.DocumentFile
@@ -53,7 +54,6 @@ import org.apache.commons.compress.compressors.zstandard.ZstdCompressorInputStre
 import org.tukaani.xz.LZMA2Options
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.charset.Charset
@@ -1037,16 +1037,30 @@ object ArchiveRepository : ArchiveEngine {
         val inputDispatcher = Dispatchers.IO.limitedParallelism(threads.coerceIn(1, 8))
         inputUris.mapIndexed { index, uri ->
             async(inputDispatcher) {
-                val root = File(tempDirectory, "input-$index").apply { mkdirs() }
-                val tree = DocumentFile.fromTreeUri(context, uri)
-                if (tree?.isDirectory == true) {
+                val root = File(tempDirectory, "input-$index").also { directory ->
+                    if (!directory.isDirectory && !directory.mkdirs()) {
+                        throw ArchiveOperationException(
+                            ArchiveErrorCode.INSUFFICIENT_STORAGE,
+                            "无法创建临时目录，请检查存储空间后重试",
+                        )
+                    }
+                }
+                if (DocumentsContract.isTreeUri(uri)) {
+                    val tree = treeDocument(context, uri)
                     val rootName = safeSegment(tree.name, "folder-$index")
-                    val destination = File(root, rootName).apply { mkdirs() }
+                    val destination = File(root, rootName).also { directory ->
+                        if (!directory.isDirectory && !directory.mkdirs()) {
+                            throw ArchiveOperationException(
+                                ArchiveErrorCode.INSUFFICIENT_STORAGE,
+                                "无法创建临时目录，请检查存储空间后重试",
+                            )
+                        }
+                    }
                     copyDocumentTree(context, tree, destination)
                     collectStagedFiles(destination, rootName)
                 } else {
-                    val source = DocumentFile.fromSingleUri(context, uri)
-                    val name = safeSegment(source?.name ?: displayName(context, uri), "file-$index")
+                    val source = singleFileDocument(context, uri)
+                    val name = safeSegment(source.name ?: displayName(context, uri), "file-$index")
                     val destination = File(root, name)
                     copyUriToFile(context, uri, destination)
                     listOf(StagedInput(destination, name))
@@ -1056,16 +1070,87 @@ object ArchiveRepository : ArchiveEngine {
     }
 
     private fun copyDocumentTree(context: Context, source: DocumentFile, destination: File) {
-        source.listFiles().forEachIndexed { index, child ->
+        val children = try {
+            source.listFiles()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            throw ArchiveOperationException(
+                ArchiveErrorCode.PERMISSION_REVOKED,
+                "无法读取目录内容，请确认访问权限后重试",
+                error,
+            )
+        }
+        children.forEachIndexed { index, child ->
             val name = safeSegment(child.name, "item-$index")
             val target = File(destination, name)
             if (child.isDirectory) {
-                target.mkdirs()
+                if (!target.isDirectory && !target.mkdirs()) {
+                    throw ArchiveOperationException(
+                        ArchiveErrorCode.INSUFFICIENT_STORAGE,
+                        "无法创建临时目录，请检查存储空间后重试",
+                    )
+                }
                 copyDocumentTree(context, child, target)
             } else if (child.isFile) {
                 copyUriToFile(context, child.uri, target)
+            } else {
+                throw ArchiveOperationException(
+                    ArchiveErrorCode.PERMISSION_REVOKED,
+                    "无法读取目录中的某个项目，请检查目录权限后重试",
+                )
             }
         }
+    }
+
+    private fun treeDocument(context: Context, uri: Uri): DocumentFile {
+        val tree = try {
+            DocumentFile.fromTreeUri(context, uri)
+        } catch (error: IllegalArgumentException) {
+            throw ArchiveOperationException(
+                ArchiveErrorCode.INVALID_PATH,
+                "所选目录不是有效的目录授权，请重新选择目录后重试",
+                error,
+            )
+        }
+        if (tree == null) {
+            throw ArchiveOperationException(
+                ArchiveErrorCode.PERMISSION_REVOKED,
+                "无法访问所选目录，请重新授权后重试",
+            )
+        }
+        if (!tree.isDirectory) {
+            throw ArchiveOperationException(
+                ArchiveErrorCode.INVALID_PATH,
+                "所选内容不是目录，请重新选择目录后重试",
+            )
+        }
+        return tree
+    }
+
+    private fun singleFileDocument(context: Context, uri: Uri): DocumentFile {
+        val source = try {
+            DocumentFile.fromSingleUri(context, uri)
+        } catch (error: IllegalArgumentException) {
+            throw ArchiveOperationException(
+                ArchiveErrorCode.INVALID_PATH,
+                "所选文件不是有效的文档，请重新选择文件后重试",
+                error,
+            )
+        }
+        if (source == null) {
+            throw ArchiveOperationException(
+                ArchiveErrorCode.PERMISSION_REVOKED,
+                "无法访问所选文件，请重新授权后重试",
+            )
+        }
+        if (!source.isFile) {
+            throw ArchiveOperationException(
+                ArchiveErrorCode.INVALID_PATH,
+                "所选内容不是文件，请重新选择文件或目录",
+            )
+        }
+        return source
     }
 
     private fun collectStagedFiles(root: File, entryRoot: String): List<StagedInput> {
@@ -1496,11 +1581,37 @@ object ArchiveRepository : ArchiveEngine {
     }
 
     private fun copyUriToFile(context: Context, uri: Uri, destination: File) {
-        destination.parentFile?.mkdirs()
-        val input = context.contentResolver.openInputStream(uri)
-            ?: throw IOException("无法读取文件")
-        input.use { source ->
-            destination.outputStream().use { target -> source.copyTo(target) }
+        try {
+            destination.parentFile?.let { parent ->
+                if (!parent.isDirectory && !parent.mkdirs()) {
+                    throw ArchiveOperationException(
+                        ArchiveErrorCode.INSUFFICIENT_STORAGE,
+                        "无法创建临时目录，请检查存储空间后重试",
+                    )
+                }
+            }
+            val input = context.contentResolver.openInputStream(uri)
+                ?: throw ArchiveOperationException(
+                    ArchiveErrorCode.PERMISSION_REVOKED,
+                    "无法读取所选文件，请确认访问权限后重试",
+                )
+            input.use { source ->
+                destination.outputStream().use { target -> source.copyTo(target) }
+            }
+        } catch (error: ArchiveOperationException) {
+            throw error
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            val code = ArchiveErrorClassifier.classify(error)
+            if (code == ArchiveErrorCode.UNKNOWN) {
+                throw ArchiveOperationException(
+                    ArchiveErrorCode.PERMISSION_REVOKED,
+                    "无法读取所选文件，请确认访问权限后重试",
+                    error,
+                )
+            }
+            throw ArchiveErrorClassifier.wrap(error)
         }
     }
 
