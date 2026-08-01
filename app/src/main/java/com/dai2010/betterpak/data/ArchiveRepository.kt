@@ -12,11 +12,12 @@ import com.dai2010.betterpak.core.ArchiveCoreException
 import com.dai2010.betterpak.core.ArchiveErrorCode as CoreArchiveErrorCode
 import com.dai2010.betterpak.core.ArchiveLimits
 import com.dai2010.betterpak.core.ArchiveProgress as CoreArchiveProgress
+import com.dai2010.betterpak.core.ArchiveOverwritePolicy as CoreArchiveOverwritePolicy
+import com.dai2010.betterpak.core.TarArchiveCore
+import com.dai2010.betterpak.core.TarCompression
 import com.dai2010.betterpak.core.ZipArchiveCore
 import com.dai2010.betterpak.core.ZipCompression
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import com.dai2010.betterpak.domain.ArchiveCreateOptions
 import com.dai2010.betterpak.domain.ArchiveErrorCode
 import com.dai2010.betterpak.domain.ArchiveErrorClassifier
@@ -35,7 +36,6 @@ import com.dai2010.betterpak.domain.OverwritePolicy
 import com.dai2010.betterpak.domain.PreviewKind
 import com.dai2010.betterpak.domain.PreviewPolicy
 import com.github.junrar.Archive
-import com.github.luben.zstd.ZstdOutputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -101,7 +101,9 @@ object ArchiveRepository : ArchiveEngine {
             if (
                 file.name.startsWith("betterpak-source-") ||
                 file.name.startsWith("betterpak-preview-") ||
-                file.name.startsWith("betterpak-create-")
+                file.name.startsWith("betterpak-create-") ||
+                file.name.startsWith("betterpak-zip-extract-") ||
+                file.name.startsWith("betterpak-tar-extract-")
             ) {
                 file.deleteRecursively()
             }
@@ -132,9 +134,9 @@ object ArchiveRepository : ArchiveEngine {
                     }
                     ArchiveFormat.RAR -> listRar(source, password)
                     ArchiveFormat.SEVEN_Z -> listSevenZ(source, password)
-                    ArchiveFormat.TAR -> listTar(source)
+                    ArchiveFormat.TAR -> listTarCore(source, TarCompression.NONE)
                     ArchiveFormat.ZSTANDARD -> listZstandard(source, displayName(context, uri))
-                    ArchiveFormat.TAR_ZSTANDARD -> listTarZstandard(source)
+                    ArchiveFormat.TAR_ZSTANDARD -> listTarCore(source, TarCompression.ZSTANDARD)
                     ArchiveFormat.UNKNOWN -> error("暂不支持该压缩包格式")
                 }
             } finally {
@@ -190,13 +192,14 @@ object ArchiveRepository : ArchiveEngine {
                         options,
                         onProgress,
                     )
-                    ArchiveFormat.TAR -> extractTar(
+                    ArchiveFormat.TAR -> extractTarCore(
                         context,
                         source,
                         root,
                         selectedPaths,
                         options,
                         onProgress,
+                        TarCompression.NONE,
                     )
                     ArchiveFormat.ZSTANDARD -> extractZstandard(
                         context,
@@ -207,13 +210,14 @@ object ArchiveRepository : ArchiveEngine {
                         options,
                         onProgress,
                     )
-                    ArchiveFormat.TAR_ZSTANDARD -> extractTarZstandard(
+                    ArchiveFormat.TAR_ZSTANDARD -> extractTarCore(
                         context,
                         source,
                         root,
                         selectedPaths,
                         options,
                         onProgress,
+                        TarCompression.ZSTANDARD,
                     )
                     ArchiveFormat.UNKNOWN -> error("暂不支持该压缩包格式")
                 }
@@ -358,61 +362,28 @@ object ArchiveRepository : ArchiveEngine {
             val outputFile = File(tempDirectory, if (compressed) "archive.tar.zst" else "archive.tar")
             try {
                 val stagedInputs = stageInputs(context, inputUris, tempDirectory, options.threads)
-                val totalBytes = stagedInputs.sumOf { if (it.file.isFile) it.file.length() else 0L }
-                if (compressed) {
-                    ZstdOutputStream(outputFile.outputStream().buffered()).use { zstdOutput ->
-                        zstdOutput.setLevel(options.compressionLevel.coerceIn(1, 22))
-                        writeTarArchive(stagedInputs, zstdOutput, totalBytes, onProgress)
-                    }
-                } else {
-                    outputFile.outputStream().buffered().use { tarOutput ->
-                        writeTarArchive(stagedInputs, tarOutput, totalBytes, onProgress)
-                    }
+                val stagedRoots = stagedInputs
+                    .filter { staged -> staged.entryName == staged.file.name }
+                    .map { staged -> staged.file.toPath() }
+                require(stagedRoots.isNotEmpty()) { "没有可归档的输入内容" }
+                runCoreWithProgress(onProgress) { isCancelled, progress ->
+                    TarArchiveCore().create(
+                        inputs = stagedRoots,
+                        output = outputFile.toPath(),
+                        compression = if (compressed) TarCompression.ZSTANDARD else TarCompression.NONE,
+                        compressionLevel = options.compressionLevel.coerceIn(1, 22),
+                        limits = ArchiveLimits(
+                            maxEntries = MAX_LIST_ENTRIES,
+                            maxExpandedBytes = MAX_STREAM_EXPANDED_BYTES,
+                        ),
+                        isCancelled = isCancelled,
+                        onProgress = progress,
+                    )
                 }
                 copyFileToUri(context, outputFile, outputUri, onProgress)
                 stagedInputs.count { it.file.isFile }
             } finally {
                 tempDirectory.deleteRecursively()
-            }
-        }
-    }
-
-    private suspend fun writeTarArchive(
-        stagedInputs: List<StagedInput>,
-        output: OutputStream,
-        totalBytes: Long,
-        onProgress: suspend (ArchiveProgress) -> Unit,
-    ) {
-        var processedEntries = 0
-        var processedBytes = 0L
-        TarArchiveOutputStream(output).use { archive ->
-            archive.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX)
-            archive.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX)
-            stagedInputs.forEach { staged ->
-                coroutineContext.ensureActive()
-                val entry = archive.createArchiveEntry(staged.file, staged.entryName)
-                archive.putArchiveEntry(entry)
-                if (staged.file.isFile) {
-                    staged.file.inputStream().use { input ->
-                        processedBytes += copyWithProgress(
-                            input,
-                            archive,
-                            totalBytes,
-                            processedBytes,
-                            onProgress,
-                        )
-                    }
-                }
-                archive.closeArchiveEntry()
-                processedEntries++
-                onProgress(
-                    ArchiveProgress(
-                        processedEntries = processedEntries,
-                        totalEntries = stagedInputs.size,
-                        processedBytes = processedBytes,
-                        totalBytes = totalBytes,
-                    ),
-                )
             }
         }
     }
@@ -440,14 +411,19 @@ object ArchiveRepository : ArchiveEngine {
                     }
                     ArchiveFormat.RAR -> readRarEntry(source, normalizedPath, password, previewLimit)
                     ArchiveFormat.SEVEN_Z -> readSevenZEntry(source, normalizedPath, password, previewLimit)
-                    ArchiveFormat.TAR -> readTarEntry(source, normalizedPath, previewLimit)
+                    ArchiveFormat.TAR -> readTarCore(source, normalizedPath, previewLimit, TarCompression.NONE)
                     ArchiveFormat.ZSTANDARD -> {
                         require(normalizedPath == streamEntryName(displayName(context, uri))) {
                             "Zstandard 单流只有一个文件条目"
                         }
                         readZstandardEntry(source, previewLimit)
                     }
-                    ArchiveFormat.TAR_ZSTANDARD -> readTarZstandardEntry(source, normalizedPath, previewLimit)
+                    ArchiveFormat.TAR_ZSTANDARD -> readTarCore(
+                        source,
+                        normalizedPath,
+                        previewLimit,
+                        TarCompression.ZSTANDARD,
+                    )
                     ArchiveFormat.UNKNOWN -> error("暂不支持该压缩包格式")
                 } ?: error("找不到压缩包条目")
                 require(payload.size <= previewLimit) { "该文件超过预览大小限制" }
@@ -628,32 +604,22 @@ object ArchiveRepository : ArchiveEngine {
         }
     }
 
-    private suspend fun listTar(source: File): List<ArchiveItem> =
-        TarArchiveInputStream(source.inputStream().buffered()).use { archive ->
-            listTarEntries(archive)
-        }
-
-    private suspend fun listTarZstandard(source: File): List<ArchiveItem> =
-        openTarZstandard(source).use { archive ->
-            listTarEntries(archive)
-        }
-
-    private suspend fun listTarEntries(archive: TarArchiveInputStream): List<ArchiveItem> {
-        val items = mutableListOf<ArchiveItem>()
-        while (true) {
-            coroutineContext.ensureActive()
-            val entry = archive.nextTarEntry ?: break
-            if (items.size >= MAX_LIST_ENTRIES) error("压缩包文件数量超过限制")
-            val path = safeTarPath(entry)
-            items += ArchiveItem(
-                path = path,
-                size = entry.size,
-                isDirectory = entry.isDirectory,
-                modifiedTime = entry.modTime?.time,
+    private suspend fun listTarCore(source: File, compression: TarCompression): List<ArchiveItem> =
+        TarArchiveCore()
+            .list(
+                archive = source.toPath(),
+                compression = compression,
+                limits = ArchiveLimits(maxEntries = MAX_LIST_ENTRIES),
             )
-        }
-        return items
-    }
+            .map { entry ->
+                ArchiveItem(
+                    path = entry.path,
+                    size = entry.size,
+                    compressedSize = entry.compressedSize,
+                    modifiedTime = entry.modifiedTimeMillis,
+                    isDirectory = entry.isDirectory,
+                )
+            }
 
     private suspend fun listZstandard(source: File, originalName: String): List<ArchiveItem> {
         val path = streamEntryName(originalName)
@@ -731,6 +697,47 @@ object ArchiveRepository : ArchiveEngine {
                     archive = source.toPath(),
                     destination = temporaryOutput.toPath(),
                     selectedPaths = selectedPaths,
+                    limits = ArchiveLimits(
+                        maxEntries = options.maxEntries,
+                        maxExpandedBytes = options.maxExpandedBytes,
+                    ),
+                    isCancelled = isCancelled,
+                    onProgress = progress,
+                )
+            }
+            return copyExtractedTree(
+                context = context,
+                source = temporaryOutput,
+                destination = root,
+                overwritePolicy = options.overwritePolicy,
+                maxBytes = options.maxExpandedBytes,
+                onProgress = onProgress,
+            )
+        } finally {
+            temporaryDirectory.deleteRecursively()
+        }
+    }
+
+    private suspend fun extractTarCore(
+        context: Context,
+        source: File,
+        root: DocumentFile,
+        selectedPaths: Set<String>?,
+        options: ArchiveExtractOptions,
+        onProgress: suspend (ArchiveProgress) -> Unit,
+        compression: TarCompression,
+    ): Int {
+        val temporaryDirectory = File(context.cacheDir, "betterpak-tar-extract-${System.nanoTime()}")
+            .apply { mkdirs() }
+        val temporaryOutput = File(temporaryDirectory, "output").apply { mkdirs() }
+        try {
+            runCoreWithProgress(onProgress) { isCancelled, progress ->
+                TarArchiveCore().extract(
+                    archive = source.toPath(),
+                    destination = temporaryOutput.toPath(),
+                    compression = compression,
+                    selectedPaths = selectedPaths,
+                    overwritePolicy = coreOverwritePolicy(options.overwritePolicy),
                     limits = ArchiveLimits(
                         maxEntries = options.maxEntries,
                         maxExpandedBytes = options.maxExpandedBytes,
@@ -838,6 +845,12 @@ object ArchiveRepository : ArchiveEngine {
         }
     }
 
+    private fun coreOverwritePolicy(policy: OverwritePolicy): CoreArchiveOverwritePolicy = when (policy) {
+        OverwritePolicy.REPLACE -> CoreArchiveOverwritePolicy.REPLACE
+        OverwritePolicy.SKIP -> CoreArchiveOverwritePolicy.SKIP
+        OverwritePolicy.RENAME -> CoreArchiveOverwritePolicy.RENAME
+    }
+
     private suspend fun extractSevenZ(
         context: Context,
         source: File,
@@ -873,63 +886,6 @@ object ArchiveRepository : ArchiveEngine {
                 onProgress(ArchiveProgress(seenEntries, 0, expandedBytes, -1L))
                 entry = archive.nextEntry
             }
-        }
-        return extracted
-    }
-
-    private suspend fun extractTar(
-        context: Context,
-        source: File,
-        root: DocumentFile,
-        selectedPaths: Set<String>?,
-        options: ArchiveExtractOptions,
-        onProgress: suspend (ArchiveProgress) -> Unit,
-    ): Int = TarArchiveInputStream(source.inputStream().buffered()).use { archive ->
-        extractTarEntries(context, archive, root, selectedPaths, options, onProgress)
-    }
-
-    private suspend fun extractTarZstandard(
-        context: Context,
-        source: File,
-        root: DocumentFile,
-        selectedPaths: Set<String>?,
-        options: ArchiveExtractOptions,
-        onProgress: suspend (ArchiveProgress) -> Unit,
-    ): Int = openTarZstandard(source).use { archive ->
-        extractTarEntries(context, archive, root, selectedPaths, options, onProgress)
-    }
-
-    private suspend fun extractTarEntries(
-        context: Context,
-        archive: TarArchiveInputStream,
-        root: DocumentFile,
-        selectedPaths: Set<String>?,
-        options: ArchiveExtractOptions,
-        onProgress: suspend (ArchiveProgress) -> Unit,
-    ): Int {
-        var extracted = 0
-        var seenEntries = 0
-        var expandedBytes = 0L
-        while (true) {
-            coroutineContext.ensureActive()
-            val entry = archive.nextTarEntry ?: break
-            if (++seenEntries > options.maxEntries) error("压缩包文件数量超过限制")
-            val path = safeTarPath(entry)
-            if (isSelected(path, selectedPaths)) {
-                if (entry.isDirectory) {
-                    ensureDirectory(root, path)
-                } else {
-                    val output = createOutputFile(root, path, options.overwritePolicy)
-                    if (output != null) {
-                        val copied = writeEntry(context, output) { stream ->
-                            copyWithLimit(archive, stream, expandedBytes, options.maxExpandedBytes)
-                        }
-                        expandedBytes = checkedExpandedBytes(expandedBytes, copied, options)
-                        extracted++
-                    }
-                }
-            }
-            onProgress(ArchiveProgress(seenEntries, 0, expandedBytes, -1L))
         }
         return extracted
     }
@@ -1199,48 +1155,21 @@ object ArchiveRepository : ArchiveEngine {
         return null
     }
 
-    private suspend fun readTarEntry(source: File, path: String, maxBytes: Long): ByteArray? =
-        TarArchiveInputStream(source.inputStream().buffered()).use { archive ->
-            readTarEntry(archive, path, maxBytes)
-        }
-
-    private suspend fun readTarZstandardEntry(source: File, path: String, maxBytes: Long): ByteArray? =
-        openTarZstandard(source).use { archive ->
-            readTarEntry(archive, path, maxBytes)
-        }
-
-    private suspend fun readTarEntry(
-        archive: TarArchiveInputStream,
+    private suspend fun readTarCore(
+        source: File,
         path: String,
         maxBytes: Long,
-    ): ByteArray? {
-        while (true) {
-            coroutineContext.ensureActive()
-            val entry = archive.nextTarEntry ?: return null
-            val entryPath = safeTarPath(entry)
-            if (entryPath == path) {
-                require(!entry.isDirectory) { "目录不能作为单独文件打开" }
-                return readPreviewBytes(archive, maxBytes)
-            }
-        }
-    }
-
-    private suspend fun writeTarEntry(
-        archive: TarArchiveInputStream,
-        path: String,
-        output: OutputStream,
-        maxBytes: Long,
-    ): Long {
-        while (true) {
-            coroutineContext.ensureActive()
-            val entry = archive.nextTarEntry ?: error("找不到压缩包条目")
-            val entryPath = safeTarPath(entry)
-            if (entryPath == path) {
-                require(!entry.isDirectory) { "目录不能作为单独文件打开" }
-                return copyWithLimit(archive, output, 0L, maxBytes)
-            }
-        }
-    }
+        compression: TarCompression,
+    ): ByteArray = TarArchiveCore().readEntry(
+        archive = source.toPath(),
+        path = path,
+        maxBytes = maxBytes,
+        compression = compression,
+        limits = ArchiveLimits(
+            maxEntries = MAX_LIST_ENTRIES,
+            maxExpandedBytes = maxBytes,
+        ),
+    )
 
     private suspend fun readZstandardEntry(source: File, maxBytes: Long): ByteArray =
         ZstdCompressorInputStream(source.inputStream().buffered()).use { input ->
@@ -1305,11 +1234,6 @@ object ArchiveRepository : ArchiveEngine {
             }
     }
 
-    private fun safeTarPath(entry: TarArchiveEntry): String {
-        require(entry.isDirectory || entry.isFile) { "TAR 包含不支持的特殊条目：${entry.name}" }
-        return ArchivePath.normalize(entry.name) ?: error("TAR 包含不安全路径：${entry.name}")
-    }
-
     private fun streamEntryName(originalName: String): String {
         val name = originalName.substringAfterLast('/').ifBlank { "内容.zst" }
         val lowerName = name.lowercase()
@@ -1319,9 +1243,6 @@ object ArchiveRepository : ArchiveEngine {
             else -> "$name.decompressed"
         }
     }
-
-    private fun openTarZstandard(source: File): TarArchiveInputStream =
-        TarArchiveInputStream(ZstdCompressorInputStream(source.inputStream().buffered()))
 
     private fun checkedExpandedBytes(current: Long, next: Long, options: ArchiveExtractOptions): Long {
         require(next >= 0L && current <= options.maxExpandedBytes && next <= options.maxExpandedBytes - current) {
@@ -1396,9 +1317,17 @@ object ArchiveRepository : ArchiveEngine {
             }
         }
         ArchiveFormat.TAR -> {
-            TarArchiveInputStream(source.inputStream().buffered()).use { archive ->
-                writeTarEntry(archive, path, output, maxBytes)
-            }
+            TarArchiveCore().copyEntry(
+                archive = source.toPath(),
+                path = path,
+                output = output,
+                maxBytes = maxBytes,
+                compression = TarCompression.NONE,
+                limits = ArchiveLimits(
+                    maxEntries = MAX_LIST_ENTRIES,
+                    maxExpandedBytes = maxBytes.coerceIn(1L, MAX_STREAM_EXPANDED_BYTES),
+                ),
+            )
         }
         ArchiveFormat.ZSTANDARD -> {
             ZstdCompressorInputStream(source.inputStream().buffered()).use { input ->
@@ -1406,9 +1335,17 @@ object ArchiveRepository : ArchiveEngine {
             }
         }
         ArchiveFormat.TAR_ZSTANDARD -> {
-            openTarZstandard(source).use { archive ->
-                writeTarEntry(archive, path, output, maxBytes)
-            }
+            TarArchiveCore().copyEntry(
+                archive = source.toPath(),
+                path = path,
+                output = output,
+                maxBytes = maxBytes,
+                compression = TarCompression.ZSTANDARD,
+                limits = ArchiveLimits(
+                    maxEntries = MAX_LIST_ENTRIES,
+                    maxExpandedBytes = maxBytes.coerceIn(1L, MAX_STREAM_EXPANDED_BYTES),
+                ),
+            )
         }
         ArchiveFormat.UNKNOWN -> error("暂不支持该压缩包格式")
     }

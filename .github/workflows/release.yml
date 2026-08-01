@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag, for example v0.0.9-fix2
+        description: Release tag, for example v0.0.10
         required: true
-        default: v0.0.9-fix2
+        default: v0.0.10
       change_summary:
-        description: "具体变更：SAF 单文件 URI 分流、目录兼容、中文错误提示和回归验证"
+        description: "具体变更：TAR/TAR.Zstandard 核心迁移、安全边界、Android 接入和验证状态"
         required: true
-        default: "v0.0.9-fix2：修复 SAF 单文件 /document URI 创建失败；保留 /tree 目录递归；补充中文错误提示和回归测试。"
+        default: "v0.0.10：新增 TAR/TAR.Zstandard archive-core；迁移列表、创建、解压、预览和外部打开；统一路径安全、限制、取消和 staging；保留 Android SAF 适配与 v0.0.9-fix2 单文件 URI 修复。"
   push:
     tags:
       - "v*"
@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       BETTERPAK_RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-      BETTERPAK_CHANGE_SUMMARY: ${{ github.event.inputs.change_summary || 'v0.0.9-fix2：修复 SAF 单文件 /document URI 创建失败；保留 /tree 目录递归；补充中文错误提示和回归测试。' }}
+      BETTERPAK_CHANGE_SUMMARY: ${{ github.event.inputs.change_summary || 'v0.0.10：新增 TAR/TAR.Zstandard archive-core；迁移列表、创建、解压、预览和外部打开；统一路径安全、限制、取消和 staging；保留 Android SAF 适配与 v0.0.9-fix2 单文件 URI 修复。' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -143,13 +143,13 @@ jobs:
 
           ${BETTERPAK_CHANGE_SUMMARY}
 
-          ## v0.0.9-fix2 change points
+          ## v0.0.10 change points
 
-          - Detects SAF URI type with DocumentsContract.isTreeUri().
-          - Uses fromTreeUri() only for directory trees and fromSingleUri() for single files.
-          - Copies both input types into application cache staging before ZIP, 7z, TAR or tar.zst creation.
-          - Reports revoked permissions, invalid URIs, empty documents and unreadable inputs with actionable Chinese messages.
-          - Does not add MANAGE_EXTERNAL_STORAGE.
+          - Adds the Kotlin/JVM TarArchiveCore for TAR and TAR.Zstandard list, create, transactional extract, selected extract, bounded single-entry read and streaming copy.
+          - Centralizes normalized-path validation, duplicate and special-entry rejection, entry/expanded-size limits, cancellation, staging cleanup and overwrite policy at the core boundary.
+          - Routes Android TAR and tar.zst creation, listing, extraction, preview and external opening through TarArchiveCore while keeping SAF URI staging and DocumentFile output handling in Android.
+          - Keeps the v0.0.9-fix2 DocumentsContract.isTreeUri() split: fromTreeUri() only for directory trees and fromSingleUri() for single files.
+          - Does not add MANAGE_EXTERNAL_STORAGE, desktop support, RAR creation or archive password encryption.
 
           ## Artifacts
 
@@ -191,17 +191,23 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
           body: |
-            ## v0.0.9-fix2 变更点
+            ## v0.0.10 变更点
 
-            - 按 `DocumentsContract.isTreeUri()` 分流 SAF URI：目录使用 `fromTreeUri()`，单文件使用 `fromSingleUri()`。
-            - 单文件通过 `ContentResolver.openInputStream()` 复制到应用临时 staging，修复 Downloads `/document/...` URI 的 `Invalid URI` 创建失败。
-            - ZIP、7z、TAR 和 TAR.Zstandard 共用该修复；目录递归、进度、取消和失败清理保持不变。
-            - 权限撤销、无效 URI、空文档和读取失败显示中文可操作提示；不新增 `MANAGE_EXTERNAL_STORAGE`。
-            - 本次提交包含 URI 错误和权限错误回归测试，workflow 已执行测试、Lint、四 ABI 签名校验和 SHA-256 产物检查。
+            - 新增独立 Kotlin/JVM `TarArchiveCore`，统一处理 TAR 和 TAR.Zstandard 的列表、创建、事务式解压、选定条目解压、受限单条目读取和流式输出。
+            - 核心层拒绝绝对路径、路径穿越、NUL、重复规范化路径、文件/目录父子冲突和 TAR 特殊条目；统一执行条目数、展开体积、取消、符号链接和临时 staging 边界。
+            - Android TAR/TAR.Zstandard 创建、列表、解压、预览和外部打开改为调用核心；SAF URI 暂存、`DocumentFile` 目标写入、chooser、进度转发和失败清理仍由 Android 适配层负责。
+            - 保留 `v0.0.9-fix2` 的 SAF 修复：`/tree/...` 使用 `fromTreeUri()`，`/document/...` 单文件使用 `fromSingleUri()` 与 `ContentResolver.openInputStream()`，不新增 `MANAGE_EXTERNAL_STORAGE`。
+            - 新增 Unicode、空目录/空文件、路径穿越、展开上限、取消清理、单条目读取上限和 TAR.Zstandard 闭环测试；Release workflow 负责 Android 测试、Lint、签名构建、四 ABI 校验和 SHA-256 产物检查。
+
+            ## 验证与限制
+
+            - 发布门禁命令：`gradle --no-daemon --max-workers=1 :archive-core:test test lintRelease`。
+            - 构建命令：`gradle --no-daemon --max-workers=1 assembleRelease`。
+            - RAR/RAR5、7z 和独立 Zstandard 尚未迁入 `archive-core`；RAR 创建、ZIP/TAR/Zstandard 密码加密、桌面 GUI/TUI/CLI 和桌面平台支持仍不在本版本范围内。
 
             ## Submitted change summary
 
-            ${{ github.event.inputs.change_summary || 'v0.0.9-fix2：修复 SAF 单文件 /document URI 创建失败；保留 /tree 目录递归；补充中文错误提示和回归测试。' }}
+            ${{ github.event.inputs.change_summary || 'v0.0.10：新增 TAR/TAR.Zstandard archive-core；迁移列表、创建、解压、预览和外部打开；统一路径安全、限制、取消和 staging；保留 Android SAF 适配与 v0.0.9-fix2 单文件 URI 修复。' }}
 
             Signing certificate SHA-256: `${{ env.BETTERPAK_CERTIFICATE_SHA256 }}`
           files: |
