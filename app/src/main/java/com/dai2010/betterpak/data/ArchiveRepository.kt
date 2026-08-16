@@ -17,6 +17,7 @@ import com.dai2010.betterpak.core.TarArchiveCore
 import com.dai2010.betterpak.core.TarCompression
 import com.dai2010.betterpak.core.ZipArchiveCore
 import com.dai2010.betterpak.core.ZipCompression
+import com.dai2010.betterpak.core.ZstandardArchiveCore
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import com.dai2010.betterpak.domain.ArchiveCreateOptions
 import com.dai2010.betterpak.domain.ArchiveErrorCode
@@ -623,20 +624,20 @@ object ArchiveRepository : ArchiveEngine {
 
     private suspend fun listZstandard(source: File, originalName: String): List<ArchiveItem> {
         val path = streamEntryName(originalName)
-        var expandedBytes = 0L
-        ZstdCompressorInputStream(source.inputStream().buffered()).use { input ->
-            val buffer = ByteArray(BUFFER_SIZE)
-            while (true) {
-                coroutineContext.ensureActive()
-                val read = input.read(buffer)
-                if (read <= 0) break
-                require(expandedBytes <= MAX_STREAM_EXPANDED_BYTES - read) {
-                    "Zstandard 单流展开大小超过限制"
-                }
-                expandedBytes += read
-            }
-        }
-        return listOf(ArchiveItem(path = path, size = expandedBytes, isDirectory = false))
+        val parentJob = checkNotNull(coroutineContext[Job])
+        val expandedBytes = ZstandardArchiveCore().expandedSize(
+            archive = source.toPath(),
+            limits = ArchiveLimits(maxExpandedBytes = MAX_STREAM_EXPANDED_BYTES),
+            isCancelled = { !parentJob.isActive },
+        )
+        return listOf(
+            ArchiveItem(
+                path = path,
+                size = expandedBytes,
+                compressedSize = source.length(),
+                isDirectory = false,
+            ),
+        )
     }
 
     private suspend fun extractRar(
@@ -902,13 +903,18 @@ object ArchiveRepository : ArchiveEngine {
         val path = streamEntryName(originalName)
         if (!isSelected(path, selectedPaths)) return 0
         val output = createOutputFile(root, path, options.overwritePolicy) ?: return 0
-        val copied = writeEntry(context, output) { stream ->
-            ZstdCompressorInputStream(source.inputStream().buffered()).use { input ->
-                copyWithLimit(input, stream, 0L, options.maxExpandedBytes)
+        writeEntry(context, output) { stream ->
+            runCoreWithProgress(onProgress) { isCancelled, reportProgress ->
+                ZstandardArchiveCore().copyTo(
+                    archive = source.toPath(),
+                    output = stream,
+                    maxBytes = options.maxExpandedBytes,
+                    limits = ArchiveLimits(maxExpandedBytes = options.maxExpandedBytes),
+                    isCancelled = isCancelled,
+                    onProgress = reportProgress,
+                )
             }
         }
-        val expandedBytes = checkedExpandedBytes(0L, copied, options)
-        onProgress(ArchiveProgress(1, 1, expandedBytes, copied))
         return 1
     }
 
@@ -1171,10 +1177,15 @@ object ArchiveRepository : ArchiveEngine {
         ),
     )
 
-    private suspend fun readZstandardEntry(source: File, maxBytes: Long): ByteArray =
-        ZstdCompressorInputStream(source.inputStream().buffered()).use { input ->
-            readPreviewBytes(input, maxBytes)
-        }
+    private suspend fun readZstandardEntry(source: File, maxBytes: Long): ByteArray {
+        val parentJob = checkNotNull(coroutineContext[Job])
+        return ZstandardArchiveCore().read(
+            archive = source.toPath(),
+            maxBytes = maxBytes,
+            limits = ArchiveLimits(maxExpandedBytes = maxBytes),
+            isCancelled = { !parentJob.isActive },
+        )
+    }
 
     private suspend fun readPreviewBytes(input: InputStream, maxBytes: Long): ByteArray {
         val output = ByteArrayOutputStream()
@@ -1330,9 +1341,16 @@ object ArchiveRepository : ArchiveEngine {
             )
         }
         ArchiveFormat.ZSTANDARD -> {
-            ZstdCompressorInputStream(source.inputStream().buffered()).use { input ->
-                copyWithLimit(input, output, 0L, maxBytes)
-            }
+            val parentJob = checkNotNull(coroutineContext[Job])
+            ZstandardArchiveCore().copyTo(
+                archive = source.toPath(),
+                output = output,
+                maxBytes = maxBytes,
+                limits = ArchiveLimits(
+                    maxExpandedBytes = maxBytes.coerceIn(1L, MAX_STREAM_EXPANDED_BYTES),
+                ),
+                isCancelled = { !parentJob.isActive },
+            )
         }
         ArchiveFormat.TAR_ZSTANDARD -> {
             TarArchiveCore().copyEntry(
